@@ -29,28 +29,33 @@ async function initModel(
   ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
   inputBuffer = new Float32Array(3 * inputSize * inputSize);
 
-  let modelData: string | ArrayBuffer = modelUrl;
+  let modelBytes: Uint8Array | null = null;
   try {
     if ('caches' in self) {
       const cached = await caches.match(modelUrl);
       if (cached && cached.ok) {
-        modelData = await cached.arrayBuffer();
+        modelBytes = new Uint8Array(await cached.arrayBuffer());
       }
     }
-    if (typeof modelData === 'string') {
+    if (!modelBytes) {
       const resp = await fetch(modelUrl);
       if (resp.ok) {
-        modelData = await resp.arrayBuffer();
+        modelBytes = new Uint8Array(await resp.arrayBuffer());
       }
     }
   } catch {
-    modelData = modelUrl;
+    modelBytes = null;
   }
+
+  const createSession = (opts: ort.InferenceSession.SessionOptions) =>
+    modelBytes
+      ? ort.InferenceSession.create(modelBytes, opts)
+      : ort.InferenceSession.create(modelUrl, opts);
 
   let activeBackend = 'WASM';
   if ('gpu' in navigator) {
     try {
-      session = await ort.InferenceSession.create(modelData, {
+      session = await createSession({
         executionProviders: ['webgpu'],
         graphOptimizationLevel: 'basic',
       });
@@ -60,7 +65,7 @@ async function initModel(
     }
   }
   if (!session) {
-    session = await ort.InferenceSession.create(modelData, {
+    session = await createSession({
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'basic',
     });
