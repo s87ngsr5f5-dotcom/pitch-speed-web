@@ -1,3 +1,4 @@
+import { measureCheckpointFlight } from '../core/checkpointFlight';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   SMARTSCOUT_PITCH_TYPES,
@@ -109,6 +110,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const rafRef = useRef<number | null>(null);
   const detectedInFileRef = useRef(0);
   const measuredInFileRef = useRef(0);
+  const endpointSamplesRef = useRef<BallDetection[]>([]);
   const activeTrackRef = useRef<BallDetection[]>([]);
   const flushTimerRef = useRef<number | null>(null);
   const sentTimestampsRef = useRef(new Set<number>());
@@ -128,6 +130,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
     flushTimerRef.current = null;
     activeTrackRef.current = [];
+    endpointSamplesRef.current = [];
     setLiveTrackDots([]);
   }, []);
 
@@ -383,7 +386,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const betweenSamples = track.length
       ? latestBall.timestampMs - track[track.length - 1].timestampMs
       : 0;
-    if (track.length && (betweenSamples <= 0 || betweenSamples > MAX_PITCH_SAMPLE_GAP_MS ||
+    if (track.length && (betweenSamples <= 0 || (!manualCheckpoints && betweenSamples > MAX_PITCH_SAMPLE_GAP_MS) ||
       latestBall.timestampMs - track[0].timestampMs > 1600)) {
       resetTrack();
     }
@@ -402,6 +405,23 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     }
     if (uploadedVideoUrl) detectedInFileRef.current += 1;
     setLiveTrackDots([...activeTrack]);
+    if (manualCheckpoints) {
+      const sample = activeTrack[activeTrack.length - 1];
+      const samples = endpointSamplesRef.current.filter(
+        previous => sample.timestampMs - previous.timestampMs <= 1600,
+      );
+      samples.push(sample);
+      endpointSamplesRef.current = samples;
+      const result = measureCheckpointFlight(
+        samples, manualCheckpoints, video.videoWidth, video.videoHeight, distanceMeters,
+      );
+      if (result) {
+        if (uploadedVideoUrl) measuredInFileRef.current += 1;
+        setCaptureMessage(`平均球速約 ${result.averageKmh.toFixed(1)} km/h（依影格估計 ${result.minKmh.toFixed(1)}–${result.maxKmh.toFixed(1)} km/h，距離 ${distanceMeters} 公尺）`);
+        resetTrack();
+      }
+      return;
+    }
     const record = computeRealPitchFromDetections({
       detections: activeTrack,
       videoWidth: video.videoWidth,
@@ -775,9 +795,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           {workerError || captureMessage || (discipline === 'hitting'
             ? '目前支援投球測速。請在設定中切換為投球。'
             : calibration
-              ? calibration.release ? '點選球通過本壘的位置' : '點選投手放球的位置'
+              ? calibration.release ? '點選球到達捕手手套的位置' : '點選投手放球的位置'
               : manualCheckpoints
-                ? '使用你設定的出手與本壘位置。'
+                ? '使用你設定的出手及接球位置，依設定距離估算平均球速。'
                 : '自動辨識出手和接球。請固定鏡頭，讓投手、球路與捕手都入鏡。')}
         </p>
         {(uploadedVideoUrl || hasLiveCamera) && !calibrating && discipline === 'pitching' && <>
