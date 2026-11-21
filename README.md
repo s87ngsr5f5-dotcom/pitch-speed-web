@@ -1,6 +1,15 @@
 # PitchSpeed Web (18.44m)
 
-支援 **iOS Safari 後置鏡頭**、**iPhone 120/240fps 慢動作影片** 與 **離線 PWA 橫向全螢幕 HUD** 的純前端棒球測速系統，透過「**垂直飛行切面 Homography 矩陣 + 重力補償拋物線最小平方法**」消除斜角拍攝與可變球路高度誤差，可直接部署至 GitHub Pages（HTTPS）。
+- **線上公開網址 (GitHub Pages)**：https://s87ngsr5f5-dotcom.github.io/pitch-speed-web/
+- **GitHub 程式碼倉庫**：https://github.com/s87ngsr5f5-dotcom/pitch-speed-web
+
+支援 **iOS Safari 後置鏡頭**、**iPhone 120/240fps 慢動作影片**、**100 部投球模型練習判斷實驗室** 與 **離線 PWA 橫向全螢幕 HUD** 的純前端棒球測速系統，透過「**垂直飛行切面 Homography 矩陣 + 重力補償拋物線最小平方法**」消除斜角拍攝與可變球路高度誤差，可直接部署至 GitHub Pages（HTTPS）。
+
+## 100 部投球模型跑分驗證結果
+透過 `ml_pipeline/batch_benchmark_100.py` 對 100 部涵蓋 5 大球種（四縫線速球、伸卡球、滑球、變速球、曲球）、3 種幀率（60/120/240fps）與 3 種斜角視角之投球模型實測（完整報告見 `ml_pipeline/BENCHMARK_100_REPORT.md`）：
+- **平均絕對誤差 (MAE)**：**`0.40 km/h`**
+- **均方根誤差 (RMSE)**：**`0.55 km/h`**
+- **誤差 ≤ ±1.5 km/h 比例**：**`99.0%`**（240fps 慢動作平均誤差僅 **`0.23 km/h`**）
 
 ## 內建核心特色
 - **18.44m 垂直切面空間校正**：零 `opencv.js` 依賴，以純 TypeScript 實作 Hartley 正規化 DLT，支援任意高度球路與斜角拍攝。
