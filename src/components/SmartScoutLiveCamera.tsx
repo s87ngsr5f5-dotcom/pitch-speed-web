@@ -119,6 +119,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     behind_catcher: readCheckpoints('behind_catcher'),
   }));
   const [fileCheckpoints, setFileCheckpoints] = useState<TunnelBoxConfig | null>(null);
+  const [calibrationTime, setCalibrationTime] = useState(0);
   const [calibration, setCalibration] = useState<{ release?: Point2D } | null>(null);
   const calibrating = calibration !== null;
   const checkpoints = uploadedVideoUrl
@@ -673,8 +674,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             const area = region ? '所選範圍內' : '全畫面';
             const detected = detectedInFileRef.current;
             setCaptureMessage(detected
-              ? `${area}在 ${detected} 幀找到疑似球的位置，但無法確認完整球路。可重選範圍或手動核對。`
-              : `${area}沒有偵測到球。請確認球路在畫面內，或手動核對影片時間。`);
+              ? `${area}在 ${detected} 幀找到疑似球的位置，但無法確認完整球路。可按「手動標記出手與接球時間」計算。`
+              : `${area}沒有偵測到球。可按「手動標記出手與接球時間」計算。`);
           }
         }}
         onLoadedMetadata={(event) => {
@@ -826,12 +827,27 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             onClick={() => {
               resetTrack();
               setCaptureMessage('');
+              if (!calibrating && uploadedVideoUrl && videoRef.current) {
+                videoRef.current.pause();
+                setCalibrationTime(videoRef.current.currentTime);
+              }
               setCalibration(calibrating ? null : {});
             }}
             className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
           >
             {calibrating ? '取消調整' : '調整測速框'}
           </button>
+        )}
+        {calibrating && uploadedVideoUrl && Number.isFinite(videoRef.current?.duration) && (
+          <label className="block">
+            拖曳到出手或接球畫面（{calibrationTime.toFixed(2)} 秒）
+            <input className="block w-full" type="range" min={0} max={videoRef.current?.duration}
+              step={0.001} value={calibrationTime} onChange={event => {
+                const time = Number(event.currentTarget.value);
+                if (videoRef.current) videoRef.current.currentTime = time;
+                setCalibrationTime(time);
+              }} />
+          </label>
         )}
         {manualCheckpoints && !calibrating && (
           <button
@@ -860,7 +876,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         {uploadedVideoUrl && !calibrating && !choosingRegion && (
           <button type="button" className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
             onClick={() => { videoRef.current?.pause(); resetTrack(); setReviewingFlight(true); }}>
-            手動核對影片時間
+            手動標記出手與接球時間
           </button>
         )}
       </div>
