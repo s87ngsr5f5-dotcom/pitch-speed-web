@@ -152,7 +152,7 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
       ctx.fillText(`${pitch.speedKmh.toFixed(1)} km/h`, 46, stageH - 230);
       ctx.font = 'bold 20px sans-serif';
       ctx.fillText(
-        `${pitch.pitchType} | VB ${pitch.verticalBreakCm}cm | HB ${pitch.horizontalBreakCm}cm | ${pitch.totalSpinRpm} rpm`,
+        `光學追蹤 · ${pitch.pitchType}`,
         46,
         stageH - 150
       );
@@ -376,7 +376,7 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
           <div className="rounded-2xl bg-[#18110e]/88 backdrop-blur-md px-4 py-3 text-white shadow-2xl border border-white/10">
             <div className="flex items-center justify-between gap-2">
               <div>
-                <div className="text-xs font-medium text-neutral-300">初速</div>
+                <div className="text-xs font-medium text-neutral-300">{pitch.measurement ? '預估初速' : '初速'}</div>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-[42px] font-bold leading-tight tracking-tight tabular-nums">
                     {pitch.speedKmh.toFixed(1)}
@@ -401,85 +401,17 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
               </div>
             </div>
 
-            <div className="mt-2 grid grid-cols-4 gap-1.5 text-center">
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">VB [cm] 垂直</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {pitch.verticalBreakCm.toFixed(1)}
-                </div>
+            {pitch.measurement ? (
+              <p className="mt-2 text-xs text-neutral-300">
+                飛行 {Math.round(pitch.measurement.flightTimeMs)} ms · 偵測 {pitch.measurement.detectionCount} 幀
+              </p>
+            ) : (
+              <div className="mt-2 grid grid-cols-3 gap-1.5 text-xs text-neutral-300">
+                <span>VB {pitch.verticalBreakCm?.toFixed(1) ?? '—'} cm</span>
+                <span>HB {pitch.horizontalBreakCm?.toFixed(1) ?? '—'} cm</span>
+                <span>轉速 {pitch.totalSpinRpm ?? '—'} rpm</span>
               </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">HB [cm] 水平</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {pitch.horizontalBreakCm.toFixed(1)}
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">E [%] 效率</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {pitch.efficiencyPct}%
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1 flex flex-col items-center justify-center">
-                <div className="text-[10px] text-neutral-400">SD 旋轉方向</div>
-                <div className="mt-0.5 flex items-center gap-1">
-                  <span className="text-base font-bold tabular-nums">{pitch.spinDirection}</span>
-                  <span
-                    className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-white/50 text-[9px]"
-                    style={{
-                      transform: `rotate(${90 - (pitch.spinAxisDeg ?? 45)}deg)`,
-                    }}
-                  >
-                    ↑
-                  </span>
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">GD [°] 陀螺角</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">{pitch.gyroDegree}°</div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">AS [rpm] 有效</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">{pitch.activeSpinRpm}</div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">S [rpm] 轉速</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">{pitch.totalSpinRpm}</div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1 px-1 flex flex-col items-center justify-center">
-                <div className="text-[10px] text-neutral-400">進壘 #{pitch.zoneId ?? 5}</div>
-                <svg width="26" height="28" viewBox="0 0 30 32" className="mt-0.5">
-                  <rect
-                    x="4"
-                    y="3"
-                    width="22"
-                    height="25"
-                    fill="none"
-                    stroke="rgba(255,255,255,0.65)"
-                    strokeWidth="1.4"
-                  />
-                  <line x1="11.3" y1="3" x2="11.3" y2="28" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  <line x1="18.6" y1="3" x2="18.6" y2="28" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  <line x1="4" y1="11.3" x2="26" y2="11.3" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  <line x1="4" y1="19.6" x2="26" y2="19.6" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  <circle
-                    cx={Math.max(2, Math.min(28, 15 + (pitch.plateXCm / 21.6) * 11))}
-                    cy={Math.max(2, Math.min(30, 15.5 - ((pitch.plateYCm - 76) / 30) * 12))}
-                    r="3.2"
-                    fill="#ef233c"
-                    stroke="#ffffff"
-                    strokeWidth="1"
-                  />
-                </svg>
-              </div>
-            </div>
+            )}
           </div>
         )}
 

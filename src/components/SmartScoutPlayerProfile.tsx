@@ -28,14 +28,12 @@ export const SmartScoutPlayerProfile: React.FC<SmartScoutPlayerProfileProps> = (
     totalCount > 0
       ? (allPitches.reduce((a, p) => a + p.speedKmh, 0) / totalCount).toFixed(1)
       : '--.-';
-  const maxSpin =
-    totalCount > 0
-      ? Math.max(...allPitches.map((p) => p.totalSpinRpm))
-      : '--';
-  const avgVB =
-    totalCount > 0
-      ? (allPitches.reduce((a, p) => a + p.verticalBreakCm, 0) / totalCount).toFixed(1)
-      : '--.-';
+  const spinRates = allPitches.flatMap((p) => p.totalSpinRpm ?? []);
+  const verticalBreaks = allPitches.flatMap((p) => p.verticalBreakCm ?? []);
+  const maxSpin = spinRates.length ? Math.max(...spinRates) : '—';
+  const avgVB = verticalBreaks.length
+    ? (verticalBreaks.reduce((sum, value) => sum + value, 0) / verticalBreaks.length).toFixed(1)
+    : '—';
 
   // 活躍熱力方格 (4 列 x 11 欄)
   const months = ['2月', '5月', '8月', '11月'];

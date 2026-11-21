@@ -10,9 +10,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 );
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  const hadController = navigator.serviceWorker.controller !== null;
   let refreshing = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (refreshing) return;
+    if (!hadController || refreshing) return;
     refreshing = true;
     window.location.reload();
   });

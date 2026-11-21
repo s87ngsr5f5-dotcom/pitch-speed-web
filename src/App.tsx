@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BallDetection,
-  BenchmarkDataset,
   WorkerInMessage,
   WorkerOutMessage,
 } from './types';
@@ -14,7 +13,6 @@ import {
   INITIAL_SMARTSCOUT_SESSIONS,
   SmartScoutPitchRecord,
   SmartScoutSession,
-  convertBenchmark100ToSession,
   getPitchTypeColor,
   speakPitchResult,
 } from './data/smartScoutDefaultSessions';
@@ -25,6 +23,7 @@ const LEGACY_TEMPLATE_IDS = new Set([
   'session-2026-08-26-hit',
   'session-2026-08-19-pitch',
   'session-ai-coach-demo',
+  'session-benchmark-100',
 ]);
 
 export function App() {
@@ -61,6 +60,7 @@ export function App() {
   } | null>(null);
 
   const [workerStatus, setWorkerStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [workerError, setWorkerError] = useState<string>();
   const [backend, setBackend] = useState<string>('');
   const [inferTimeMs, setInferTimeMs] = useState<number>(0);
   const [latestBall, setLatestBall] = useState<BallDetection | null>(null);
@@ -80,28 +80,9 @@ export function App() {
     forceUpdateModel,
   } = useModelCache(modelUrl, workerStatus);
 
-  // 自動載入 100 球基準測試庫 (benchmark_100.json) 供「場次」分頁瀏覽
-  useEffect(() => {
-    const url = new URL('./data/benchmark_100.json', window.location.href).href;
-    fetch(url)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: BenchmarkDataset | null) => {
-        if (!data?.pitches?.length) return;
-        const benchSession = convertBenchmark100ToSession(data);
-        setSessions((prev) => {
-          if (prev.some((s) => s.id === benchSession.id)) return prev;
-          return [...prev, benchSession];
-        });
-      })
-      .catch(() => {});
-  }, []);
-
   useEffect(() => {
     try {
-      const toStore = sessions.filter(
-        (s) => s.id !== 'session-benchmark-100' && !LEGACY_TEMPLATE_IDS.has(s.id)
-      );
-      window.localStorage.setItem(SMARTSCOUT_SESSIONS_KEY, JSON.stringify(toStore));
+      window.localStorage.setItem(SMARTSCOUT_SESSIONS_KEY, JSON.stringify(sessions));
     } catch {
       // ignore
     }
@@ -114,6 +95,14 @@ export function App() {
     });
     workerRef.current = worker;
 
+    const fail = (message: string) => {
+      isBusyRef.current = false;
+      setLatestBall(null);
+      setWorkerError(message);
+      setWorkerStatus('error');
+    };
+    worker.onerror = (event) => fail(event.message || '無法啟動模型工作程序');
+    worker.onmessageerror = () => fail('無法讀取模型工作程序的回應');
     worker.onmessage = (e: MessageEvent<WorkerOutMessage>) => {
       const msg = e.data;
       if (msg.type === 'READY') {
@@ -124,8 +113,7 @@ export function App() {
         setInferTimeMs(msg.inferTimeMs);
         setLatestBall(msg.detection);
       } else if (msg.type === 'ERROR') {
-        isBusyRef.current = false;
-        setWorkerStatus('error');
+        fail(msg.message);
       }
     };
 
@@ -152,10 +140,18 @@ export function App() {
         isBusyRef.current = false;
         return;
       }
-      w.postMessage(
-        { type: 'INFER', bitmap, timestampMs, origWidth, origHeight } satisfies WorkerInMessage,
-        [bitmap]
-      );
+      try {
+        w.postMessage(
+          { type: 'INFER', bitmap, timestampMs, origWidth, origHeight } satisfies WorkerInMessage,
+          [bitmap]
+        );
+      } catch (error) {
+        bitmap.close();
+        isBusyRef.current = false;
+        setLatestBall(null);
+        setWorkerError(error instanceof Error ? error.message : String(error));
+        setWorkerStatus('error');
+      }
     },
     []
   );
@@ -168,15 +164,11 @@ export function App() {
       const timeStr = `${dateStr} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
       const pitchId = `p-${Date.now()}`;
 
-      let targetSessId =
-        selectedSessionId && selectedSessionId !== 'session-benchmark-100'
-          ? selectedSessionId
-          : sessions.find((s) => s.id !== 'session-benchmark-100')?.id ?? '';
+      let targetSessId = sessions.find((s) => s.id === selectedSessionId)?.id ?? sessions[0]?.id ?? '';
       let createdRecord: SmartScoutPitchRecord | null = null;
 
       setSessions((prev) => {
-        const userSessions = prev.filter((s) => s.id !== 'session-benchmark-100');
-        if (userSessions.length === 0 || !targetSessId) {
+        if (!prev.some((s) => s.id === targetSessId)) {
           targetSessId = `session-${Date.now()}`;
           const record: SmartScoutPitchRecord = {
             ...newPitchData,
@@ -227,10 +219,8 @@ export function App() {
 
   // 相機頁面僅顯示使用者當次實測到的最新球，不預載舊模板球
   const activeUserSession =
-    sessions.find(
-      (s) => s.id === activePlayerPitch?.sessionId && s.id !== 'session-benchmark-100'
-    ) ??
-    sessions.find((s) => s.id !== 'session-benchmark-100') ??
+    sessions.find((s) => s.id === activePlayerPitch?.sessionId) ??
+    sessions[0] ??
     null;
 
   const liveMeasuredPitch =
@@ -239,7 +229,6 @@ export function App() {
         activeUserSession.pitches[activeUserSession.pitches.length - 1]
       : null;
 
-  // 「影片」分頁可回放使用者實測球或從「場次」點選的 100 球基準庫
   const currentVideoSession =
     sessions.find((s) => s.id === activePlayerPitch?.sessionId) ??
     activeUserSession ??
@@ -265,7 +254,7 @@ export function App() {
             ? { ...s, pitches: s.pitches.filter((p) => p.id !== pitchId) }
             : s
         )
-        .filter((s) => s.pitches.length > 0 || s.id === 'session-benchmark-100')
+        .filter((s) => s.pitches.length > 0)
     );
   }, []);
 
@@ -304,6 +293,7 @@ export function App() {
             discipline={discipline}
             distanceMeters={distanceMeters}
             isWorkerReady={workerStatus === 'ready'}
+            workerError={workerError}
             isBusyRef={isBusyRef}
             latestBall={latestBall}
             onBackToSession={() => setNavTab('sessions')}

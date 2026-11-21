@@ -24,6 +24,123 @@ export const DEFAULT_TUNNEL_CONFIGS: Record<
   },
 };
 
+interface PitchFlightParams {
+  detections: BallDetection[];
+  videoWidth: number;
+  videoHeight: number;
+  cameraAngle: 'behind_pitcher' | 'behind_catcher';
+  distanceMeters: number;
+  extensionMeters?: number;
+  checkpoints?: TunnelBoxConfig;
+}
+
+export const MAX_PITCH_SAMPLE_GAP_MS = 100;
+
+/**
+ * Estimate the release speed from a track that covers both image checkpoints.
+ * Image checkpoints and the default extension are approximations. This method
+ * does not infer 3D positions, spin or strike location from the boxes.
+ */
+export function estimatePitchFlight({
+  detections,
+  videoWidth,
+  videoHeight,
+  cameraAngle,
+  distanceMeters,
+  extensionMeters = 1.75,
+  checkpoints = DEFAULT_TUNNEL_CONFIGS[cameraAngle],
+}: PitchFlightParams) {
+  const flightDistanceMeters = distanceMeters - extensionMeters;
+  if (
+    videoWidth <= 0 ||
+    videoHeight <= 0 ||
+    !Number.isFinite(flightDistanceMeters) ||
+    flightDistanceMeters <= 0
+  ) return null;
+
+  const inBox = (sample: BallDetection, box: TunnelBoxConfig['releaseBox']) =>
+    Math.abs(sample.x / videoWidth - box.cx) <= box.width / 2 &&
+    Math.abs(sample.y / videoHeight - box.cy) <= box.height / 2;
+
+  const directionX = checkpoints.strikeZoneBox.cx - checkpoints.releaseBox.cx;
+  const directionY = checkpoints.strikeZoneBox.cy - checkpoints.releaseBox.cy;
+  const directionLength = Math.hypot(directionX, directionY);
+  if (directionLength < 0.05) return null;
+  const alongFlight = (sample: BallDetection) =>
+    ((sample.x / videoWidth - checkpoints.releaseBox.cx) * directionX +
+      (sample.y / videoHeight - checkpoints.releaseBox.cy) * directionY) /
+    (directionLength * directionLength);
+
+  let track: BallDetection[] = [];
+  let priorPosition = 0;
+  for (const detection of detections) {
+    if (
+      !Number.isFinite(detection.timestampMs) ||
+      !(detection.confidence > 0 && detection.confidence <= 1) ||
+      !(detection.width > 0 && detection.height > 0) ||
+      !(detection.x >= 0 && detection.x <= videoWidth) ||
+      !(detection.y >= 0 && detection.y <= videoHeight)
+    ) continue;
+
+    const position = alongFlight(detection);
+    if (track.length) {
+      const previous = track[track.length - 1];
+      const gapMs = detection.timestampMs - previous.timestampMs;
+      if (gapMs <= 0) continue;
+      if (
+        gapMs > MAX_PITCH_SAMPLE_GAP_MS ||
+        Math.abs(position - priorPosition) > 0.55 ||
+        position < priorPosition - 0.2 ||
+        detection.timestampMs - track[0].timestampMs > 1600
+      ) {
+        track = [];
+      } else if (
+        track.length === 1 &&
+        position <= 0.25 &&
+        inBox(detection, checkpoints.releaseBox) &&
+        Math.hypot(
+          (detection.x - previous.x) / videoWidth,
+          (detection.y - previous.y) / videoHeight,
+        ) < 0.006
+      ) {
+        // A ball held still before the pitch does not start the flight clock.
+        track = [];
+      }
+    }
+
+    if (!track.length && (!inBox(detection, checkpoints.releaseBox) || position > 0.25)) {
+      continue;
+    }
+
+    const previousSample = track[track.length - 1];
+    const previousPosition = priorPosition;
+    track.push(detection);
+    priorPosition = position;
+    if (
+      track.length < 5 ||
+      position < 0.98 ||
+      !inBox(detection, checkpoints.strikeZoneBox)
+    ) continue;
+
+    const plateTimestampMs = previousPosition < 1 && position > 1
+      ? previousSample.timestampMs +
+        ((1 - previousPosition) / (position - previousPosition)) *
+          (detection.timestampMs - previousSample.timestampMs)
+      : detection.timestampMs;
+    const flightTimeMs = plateTimestampMs - track[0].timestampMs;
+    const speedKmh = (flightDistanceMeters / (flightTimeMs / 1000)) * 3.6 / 0.955;
+    if (!Number.isFinite(speedKmh) || speedKmh < 35 || speedKmh > 195) continue;
+
+    return {
+      speedKmh: Number(speedKmh.toFixed(1)),
+      flightTimeMs,
+      detectionCount: track.length,
+      track,
+    };
+  }
+  return null;
+}
+
 export const PITCH_COLOR_MAP: Record<string, { name: string; short: string; color: string }> = {
   four_seam: { name: '四縫線速球 (4-Seam)', short: '四縫線', color: '#ef4444' },
   sinker: { name: '二縫線伸卡 (Sinker)', short: '伸卡球', color: '#f97316' },

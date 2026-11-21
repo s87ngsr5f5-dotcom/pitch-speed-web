@@ -19,6 +19,14 @@ interface SmartScoutSessionViewProps {
   onCreateNewSession: () => void;
 }
 
+function averageMetric(
+  pitches: SmartScoutPitchRecord[],
+  key: 'speedKmh' | 'verticalBreakCm' | 'horizontalBreakCm' | 'totalSpinRpm' | 'efficiencyPct',
+) {
+  const values = pitches.flatMap((pitch) => pitch[key] ?? []);
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined;
+}
+
 const MiniRibbonAndZoneThumb: React.FC<{ pitch: SmartScoutPitchRecord }> = ({ pitch }) => {
   const samples = useMemo(
     () => sampleQuadraticRibbon(pitch.ribbonPath, 64, 64, 1, 16),
@@ -48,10 +56,10 @@ const MiniRibbonAndZoneThumb: React.FC<{ pitch: SmartScoutPitchRecord }> = ({ pi
             />
           )}
         </svg>
-        <span className="mt-0.5 text-[9px] text-slate-400">3D軌跡</span>
+        <span className="mt-0.5 text-[9px] text-slate-400">{pitch.measurement ? '球路' : '3D 軌跡'}</span>
       </div>
 
-      {/* 九宮格落點縮圖 */}
+      {pitch.plateXCm !== undefined && pitch.plateYCm !== undefined && (
       <div className="flex flex-col items-center">
         <svg
           width="42"
@@ -71,8 +79,9 @@ const MiniRibbonAndZoneThumb: React.FC<{ pitch: SmartScoutPitchRecord }> = ({ pi
             fill="#ef233c"
           />
         </svg>
-        <span className="mt-0.5 text-[9px] text-slate-400">#{pitch.zoneId ?? 5}</span>
+        <span className="mt-0.5 text-[9px] text-slate-400">#{pitch.zoneId}</span>
       </div>
+      )}
     </div>
   );
 };
@@ -89,7 +98,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [disciplineFilter, setDisciplineFilter] = useState<'all' | 'pitching' | 'hitting'>('all');
-  const [activeSubTab, setActiveSubTab] = useState<'list' | 'chart' | 'ai_coach'>('list');
+  const [activeSubTab, setActiveSubTab] = useState<'list' | 'chart' | 'summary'>('list');
   const [chartType, setChartType] = useState<'movement' | 'strike_zone'>('movement');
   const [selectedChartPitchId, setSelectedChartPitchId] = useState<string | null>(null);
   const [showCompareModal, setShowCompareModal] = useState<boolean>(false);
@@ -102,53 +111,22 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
 
   const pitchTypeSummaries = useMemo(() => {
     if (!activeSession) return [];
-    const groups = new Map<
-      string,
-      {
-        name: string;
-        color: string;
-        count: number;
-        sumV: number;
-        maxV: number;
-        sumVB: number;
-        sumHB: number;
-        sumSpin: number;
-        sumEff: number;
-      }
-    >();
-
-    for (const p of activeSession.pitches) {
-      const curr = groups.get(p.pitchType) ?? {
-        name: p.pitchType,
-        color: getPitchTypeColor(p.pitchType),
-        count: 0,
-        sumV: 0,
-        maxV: 0,
-        sumVB: 0,
-        sumHB: 0,
-        sumSpin: 0,
-        sumEff: 0,
-      };
-      curr.count += 1;
-      curr.sumV += p.speedKmh;
-      curr.maxV = Math.max(curr.maxV, p.speedKmh);
-      curr.sumVB += p.verticalBreakCm;
-      curr.sumHB += p.horizontalBreakCm;
-      curr.sumSpin += p.totalSpinRpm;
-      curr.sumEff += p.efficiencyPct;
-      groups.set(p.pitchType, curr);
+    const groups = new Map<string, SmartScoutPitchRecord[]>();
+    for (const pitch of activeSession.pitches) {
+      const group = groups.get(pitch.pitchType) ?? [];
+      group.push(pitch);
+      groups.set(pitch.pitchType, group);
     }
 
-    return Array.from(groups.values()).map((g) => ({
-      name: g.name,
-      color: g.color,
-      count: g.count,
-      avgV: Number((g.sumV / g.count).toFixed(1)),
-      maxV: Number(g.maxV.toFixed(1)),
-      avgVB: Number((g.sumVB / g.count).toFixed(1)),
-      avgHB: Number((g.sumHB / g.count).toFixed(1)),
-      avgSpin: Math.round(g.sumSpin / g.count),
-      avgEff: Math.round(g.sumEff / g.count),
+    return Array.from(groups, ([name, pitches]) => ({
+      name,
+      color: getPitchTypeColor(name),
+      avgV: averageMetric(pitches, 'speedKmh')?.toFixed(1),
+      maxV: Math.max(...pitches.map((p) => p.speedKmh)).toFixed(1),
+      avgVB: averageMetric(pitches, 'verticalBreakCm')?.toFixed(1),
+      avgHB: averageMetric(pitches, 'horizontalBreakCm')?.toFixed(1),
+      avgSpin: averageMetric(pitches, 'totalSpinRpm')?.toFixed(0),
+      avgEff: averageMetric(pitches, 'efficiencyPct')?.toFixed(0),
     }));
   }, [activeSession]);
 
@@ -232,14 +210,8 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                 total > 0
                   ? (sess.pitches.reduce((a, p) => a + p.speedKmh, 0) / total).toFixed(1)
                   : '0.0';
-              const avgVB =
-                total > 0
-                  ? (sess.pitches.reduce((a, p) => a + p.verticalBreakCm, 0) / total).toFixed(1)
-                  : '0.0';
-              const avgHB =
-                total > 0
-                  ? (sess.pitches.reduce((a, p) => a + p.horizontalBreakCm, 0) / total).toFixed(1)
-                  : '0.0';
+              const avgVB = averageMetric(sess.pitches, 'verticalBreakCm')?.toFixed(1) ?? '—';
+              const avgHB = averageMetric(sess.pitches, 'horizontalBreakCm')?.toFixed(1) ?? '—';
               const mainType = sess.pitches[0]?.pitchType ?? '四縫線快速球';
               const mainTypeCount = sess.pitches.filter((p) => p.pitchType === mainType).length;
 
@@ -339,40 +311,22 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
     );
   }
 
-  // 2. 單一場次詳情：列表 | 圖表 | AI 教練
+  // 2. 單一場次詳情：列表 | 圖表 | 球種摘要
   const pitchesReversed = [...activeSession.pitches].sort(
     (a, b) => b.pitchNumber - a.pitchNumber
   );
 
+  const movementPitches = activeSession.pitches.filter(
+    (p): p is SmartScoutPitchRecord & { horizontalBreakCm: number; verticalBreakCm: number } =>
+      p.horizontalBreakCm !== undefined && p.verticalBreakCm !== undefined,
+  );
+  const locationPitches = activeSession.pitches.filter(
+    (p): p is SmartScoutPitchRecord & { plateXCm: number; plateYCm: number } =>
+      p.plateXCm !== undefined && p.plateYCm !== undefined,
+  );
+  const chartPitches = chartType === 'movement' ? movementPitches : locationPitches;
   const selectedChartPitch =
-    activeSession.pitches.find((p) => p.id === selectedChartPitchId) ??
-    activeSession.pitches[0] ??
-    null;
-
-  const avgVB =
-    activeSession.pitches.length > 0
-      ? activeSession.pitches.reduce((a, p) => a + p.verticalBreakCm, 0) /
-        activeSession.pitches.length
-      : 48;
-  const avgHB =
-    activeSession.pitches.length > 0
-      ? activeSession.pitches.reduce((a, p) => a + p.horizontalBreakCm, 0) /
-        activeSession.pitches.length
-      : 22;
-  const avgEff =
-    activeSession.pitches.length > 0
-      ? Math.round(
-          activeSession.pitches.reduce((a, p) => a + p.efficiencyPct, 0) /
-            activeSession.pitches.length
-        )
-      : 82;
-  const avgSpin =
-    activeSession.pitches.length > 0
-      ? Math.round(
-          activeSession.pitches.reduce((a, p) => a + p.totalSpinRpm, 0) /
-            activeSession.pitches.length
-        )
-      : 2050;
+    chartPitches.find((p) => p.id === selectedChartPitchId) ?? chartPitches[0];
 
   return (
     <div className="mx-auto max-w-2xl pb-24 space-y-4">
@@ -412,7 +366,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
             [
               { id: 'list', label: '列表' },
               { id: 'chart', label: '圖表' },
-              { id: 'ai_coach', label: 'AI 教練' },
+              { id: 'summary', label: '球種摘要' },
             ] as const
           ).map((t) => (
             <button
@@ -483,10 +437,17 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                 {/* 左側：3D 彩帶縮圖 + 九宮格落點縮圖 */}
                 <MiniRibbonAndZoneThumb pitch={p} />
 
-                {/* 右側：2x4 八格完整數據 */}
+                {p.measurement ? (
+                  <div className="flex-1 text-sm">
+                    <div className="font-bold">預估初速 {p.speedKmh.toFixed(1)} km/h</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      飛行 {Math.round(p.measurement.flightTimeMs)} ms · 偵測 {p.measurement.detectionCount} 幀
+                    </div>
+                  </div>
+                ) : (
                 <div className="flex-1 grid grid-cols-4 gap-1.5 text-center">
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
-                    <div className="text-[10px] text-slate-500">V [km/h]</div>
+                    <div className="text-[10px] text-slate-500">{p.measurement ? '預估球速' : 'V [km/h]'}</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
                       {p.speedKmh.toFixed(1)}
                     </div>
@@ -494,46 +455,47 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
                     <div className="text-[10px] text-slate-500">VB [cm]</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
-                      {p.verticalBreakCm.toFixed(1)}
+                      {p.verticalBreakCm?.toFixed(1) ?? '—'}
                     </div>
                   </div>
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
                     <div className="text-[10px] text-slate-500">HB [cm]</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
-                      {p.horizontalBreakCm.toFixed(1)}
+                      {p.horizontalBreakCm?.toFixed(1) ?? '—'}
                     </div>
                   </div>
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
                     <div className="text-[10px] text-slate-500">E [%]</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
-                      {p.efficiencyPct}
+                      {p.efficiencyPct ?? '—'}
                     </div>
                   </div>
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
                     <div className="text-[10px] text-slate-500">SD</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
-                      {p.spinDirection}
+                      {p.spinDirection ?? '—'}
                     </div>
                   </div>
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
                     <div className="text-[10px] text-slate-500">GD [°]</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
-                      {p.gyroDegree}
+                      {p.gyroDegree ?? '—'}
                     </div>
                   </div>
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
                     <div className="text-[10px] text-slate-500">AS [rpm]</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
-                      {p.activeSpinRpm}
+                      {p.activeSpinRpm ?? '—'}
                     </div>
                   </div>
                   <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
                     <div className="text-[10px] text-slate-500">S [rpm]</div>
                     <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
-                      {p.totalSpinRpm}
+                      {p.totalSpinRpm ?? '—'}
                     </div>
                   </div>
                 </div>
+                )}
               </div>
             </div>
           ))}
@@ -640,7 +602,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   );
                 })}
 
-                {activeSession.pitches.map((p) => {
+                {movementPitches.map((p) => {
                   const clampedHB = Math.max(-68, Math.min(68, p.horizontalBreakCm));
                   const clampedVB = Math.max(-68, Math.min(68, p.verticalBreakCm));
                   const cx = 185 + (clampedHB / 70) * 130;
@@ -717,7 +679,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   strokeWidth="2"
                 />
 
-                {activeSession.pitches.map((p) => {
+                {locationPitches.map((p) => {
                   const cx = 130 + (p.plateXCm / 21.6) * 65;
                   const cy = 130 - ((p.plateYCm - 76) / 30) * 75;
                   const color = getPitchTypeColor(p.pitchType);
@@ -760,8 +722,12 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
           )}
 
           <p className="text-center text-xs text-slate-500">
-            👆 點按圓點查看完整數據預覽，再次點按前往影片分頁播放 3D 軌跡
+            👆 點按圓點查看完整數據預覽，再次點按前往影片分頁播放球路
           </p>
+
+          {chartPitches.length === 0 && (
+            <p className="text-sm text-slate-500">這場沒有可繪製的三維位移或進壘座標。</p>
+          )}
 
           {selectedChartPitch && (
             <div
@@ -770,9 +736,9 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
             >
               <div className="flex items-center justify-between">
                 <span className="font-extrabold text-slate-900">
-                  #{selectedChartPitch.pitchNumber} {selectedChartPitch.pitchType}（進壘 #{selectedChartPitch.zoneId ?? 5}）
+                  #{selectedChartPitch.pitchNumber} {selectedChartPitch.pitchType}{selectedChartPitch.zoneId ? `（進壘 #${selectedChartPitch.zoneId}）` : ''}
                 </span>
-                <span className="font-bold text-[#0b72b9]">再點一下播放 3D 軌跡影片 ›</span>
+                <span className="font-bold text-[#0b72b9]">再點一下播放球路影片 ›</span>
               </div>
               <div className="grid grid-cols-4 gap-1.5 text-center font-mono">
                 <div className="rounded-lg bg-white py-1 border border-slate-200">
@@ -781,15 +747,15 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                 </div>
                 <div className="rounded-lg bg-white py-1 border border-slate-200">
                   <div className="text-[10px] text-slate-400">VB [cm]</div>
-                  <div className="font-bold text-slate-900">{selectedChartPitch.verticalBreakCm.toFixed(1)}</div>
+                  <div className="font-bold text-slate-900">{selectedChartPitch.verticalBreakCm?.toFixed(1) ?? '—'}</div>
                 </div>
                 <div className="rounded-lg bg-white py-1 border border-slate-200">
                   <div className="text-[10px] text-slate-400">HB [cm]</div>
-                  <div className="font-bold text-slate-900">{selectedChartPitch.horizontalBreakCm.toFixed(1)}</div>
+                  <div className="font-bold text-slate-900">{selectedChartPitch.horizontalBreakCm?.toFixed(1) ?? '—'}</div>
                 </div>
                 <div className="rounded-lg bg-white py-1 border border-slate-200">
                   <div className="text-[10px] text-slate-400">S [rpm]</div>
-                  <div className="font-bold text-slate-900">{selectedChartPitch.totalSpinRpm}</div>
+                  <div className="font-bold text-slate-900">{selectedChartPitch.totalSpinRpm ?? '—'}</div>
                 </div>
               </div>
             </div>
@@ -797,15 +763,12 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
         </div>
       )}
 
-      {/* 子分頁 3：AI 教練 (100% 免費解鎖：球種特徵表 + 3 大優勢 & 3 大重點改善) */}
-      {activeSubTab === 'ai_coach' && (
+      {/* 子分頁 3：球種摘要 */}
+      {activeSubTab === 'summary' && (
         <div className="space-y-4">
           <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-3">
             <div className="flex items-center justify-between">
               <h4 className="text-base font-extrabold text-slate-900">球種特徵</h4>
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800">
-                🔓 100% 免費解鎖
-              </span>
             </div>
 
             <div className="overflow-x-auto rounded-2xl border border-slate-200">
@@ -830,13 +793,13 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                         <span>{s.name}</span>
                       </td>
                       <td className="py-3 px-2 text-right font-mono">
-                        {s.avgV.toFixed(1)} / <strong>{s.maxV.toFixed(1)}</strong> km/h
+                        {s.avgV} / <strong>{s.maxV}</strong> km/h
                       </td>
                       <td className="py-3 px-2 text-right font-mono">
-                        {s.avgSpin} rpm ({s.avgEff}%)
+                        {s.avgSpin ? `${s.avgSpin} rpm` : '—'}{s.avgEff ? ` (${s.avgEff}%)` : ''}
                       </td>
-                      <td className="py-3 px-2 text-right font-mono">{s.avgVB.toFixed(1)} cm</td>
-                      <td className="py-3 px-3 text-right font-mono">{s.avgHB.toFixed(1)} cm</td>
+                      <td className="py-3 px-2 text-right font-mono">{s.avgVB ? `${s.avgVB} cm` : '—'}</td>
+                      <td className="py-3 px-3 text-right font-mono">{s.avgHB ? `${s.avgHB} cm` : '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -844,54 +807,6 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
             </div>
           </div>
 
-          <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-base font-extrabold text-slate-900">優勢與重點改善</h4>
-                <p className="text-xs text-slate-500">3 大優勢 / 3 大重點改善（生物力學與配球建議）</p>
-              </div>
-              <span className="text-xs font-bold text-[#0b72b9]">🔓</span>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 text-xs font-bold">
-              <div className="rounded-2xl bg-emerald-50 p-3 text-emerald-950 border border-emerald-200">
-                <div className="text-emerald-700">✓ 優勢 1：垂直上竄尾勁出色 ({avgVB.toFixed(1)} cm)</div>
-                <div className="mt-1 font-normal text-emerald-900/80">
-                  釋球瞬間背旋紮實，高角度進壘具極高揮空率。
-                </div>
-              </div>
-              <div className="rounded-2xl bg-emerald-50 p-3 text-emerald-950 border border-emerald-200">
-                <div className="text-emerald-700">✓ 優勢 2：轉速與效率穩定 ({avgSpin} rpm · {avgEff}%)</div>
-                <div className="mt-1 font-normal text-emerald-900/80">
-                  指尖扣球能量傳遞穩定，有效轉速維持高檔。
-                </div>
-              </div>
-              <div className="rounded-2xl bg-emerald-50 p-3 text-emerald-950 border border-emerald-200">
-                <div className="text-emerald-700">✓ 優勢 3：手臂側水平延伸 ({avgHB.toFixed(1)} cm)</div>
-                <div className="mt-1 font-normal text-emerald-900/80">
-                  自然橫向位移能有效擠壓打者內外角好球帶邊緣。
-                </div>
-              </div>
-              <div className="rounded-2xl bg-amber-50 p-3 text-amber-950 border border-amber-200">
-                <div className="text-amber-800">⚡ 重點改善 1：收斂陀螺角度提升純背旋比例</div>
-                <div className="mt-1 font-normal text-amber-900/80">
-                  食指與中指施力維持球心正後方，減少側向切球耗損。
-                </div>
-              </div>
-              <div className="rounded-2xl bg-amber-50 p-3 text-amber-950 border border-amber-200">
-                <div className="text-amber-800">⚡ 重點改善 2：固定前導腳落地後之放球高度</div>
-                <div className="mt-1 font-normal text-amber-900/80">
-                  縮小連續投球間的旋轉軸時鐘角離散度，提升九宮格邊角控球。
-                </div>
-              </div>
-              <div className="rounded-2xl bg-amber-50 p-3 text-amber-950 border border-amber-200">
-                <div className="text-amber-800">⚡ 重點改善 3：搭配 12~15 km/h 速差之共軌變化球</div>
-                <div className="mt-1 font-normal text-amber-900/80">
-                  以相同出手視窗搭配變速球或滑球，最大化打者視覺共軌混淆。
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
@@ -967,55 +882,33 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                         <tbody className="divide-y divide-slate-200 font-mono font-bold">
                           <tr>
                             <td className="py-2 text-[#0b72b9]">{pA.speedKmh.toFixed(1)}</td>
-                            <td className="py-2 font-sans text-slate-500">初速 [km/h]</td>
+                            <td className="py-2 font-sans text-slate-500">預估初速 [km/h]</td>
                             <td className="py-2 text-rose-600">{pB.speedKmh.toFixed(1)}</td>
                             <td className="py-2 text-slate-700">
                               {fmtDelta(pA.speedKmh - pB.speedKmh)}
                             </td>
                           </tr>
-                          <tr>
-                            <td className="py-2">{pA.verticalBreakCm.toFixed(1)}</td>
-                            <td className="py-2 font-sans text-slate-500">垂直 VB [cm]</td>
-                            <td className="py-2">{pB.verticalBreakCm.toFixed(1)}</td>
-                            <td className="py-2 text-slate-700">
-                              {fmtDelta(pA.verticalBreakCm - pB.verticalBreakCm)}
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="py-2">{pA.horizontalBreakCm.toFixed(1)}</td>
-                            <td className="py-2 font-sans text-slate-500">水平 HB [cm]</td>
-                            <td className="py-2">{pB.horizontalBreakCm.toFixed(1)}</td>
-                            <td className="py-2 text-slate-700">
-                              {fmtDelta(pA.horizontalBreakCm - pB.horizontalBreakCm)}
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="py-2">{pA.totalSpinRpm}</td>
-                            <td className="py-2 font-sans text-slate-500">轉速 S [rpm]</td>
-                            <td className="py-2">{pB.totalSpinRpm}</td>
-                            <td className="py-2 text-slate-700">
-                              {pA.totalSpinRpm - pB.totalSpinRpm >= 0 ? '+' : ''}
-                              {pA.totalSpinRpm - pB.totalSpinRpm}
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="py-2">{pA.activeSpinRpm}</td>
-                            <td className="py-2 font-sans text-slate-500">有效轉速 AS</td>
-                            <td className="py-2">{pB.activeSpinRpm}</td>
-                            <td className="py-2 text-slate-700">
-                              {pA.activeSpinRpm - pB.activeSpinRpm >= 0 ? '+' : ''}
-                              {pA.activeSpinRpm - pB.activeSpinRpm}
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="py-2">{pA.efficiencyPct}%</td>
-                            <td className="py-2 font-sans text-slate-500">效率 E [%]</td>
-                            <td className="py-2">{pB.efficiencyPct}%</td>
-                            <td className="py-2 text-slate-700">
-                              {pA.efficiencyPct - pB.efficiencyPct >= 0 ? '+' : ''}
-                              {pA.efficiencyPct - pB.efficiencyPct}%
-                            </td>
-                          </tr>
+                          {([
+                            ['垂直 VB [cm]', 'verticalBreakCm'],
+                            ['水平 HB [cm]', 'horizontalBreakCm'],
+                            ['轉速 S [rpm]', 'totalSpinRpm'],
+                            ['有效轉速 AS', 'activeSpinRpm'],
+                            ['效率 E [%]', 'efficiencyPct'],
+                          ] as const).map(([name, key]) => {
+                            const a = pA[key];
+                            const b = pB[key];
+                            if (a === undefined && b === undefined) return null;
+                            return (
+                              <tr key={key}>
+                                <td className="py-2">{a ?? '—'}</td>
+                                <td className="py-2 font-sans text-slate-500">{name}</td>
+                                <td className="py-2">{b ?? '—'}</td>
+                                <td className="py-2 text-slate-700">
+                                  {a !== undefined && b !== undefined ? fmtDelta(a - b) : '—'}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>

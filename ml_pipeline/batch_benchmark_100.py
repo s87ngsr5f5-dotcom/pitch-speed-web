@@ -4,7 +4,7 @@ PitchSpeed Web - 100 部投球模型練習判斷與自動化跑分腳本
    不同斜角拍攝透視變形與動態模糊的投球測試集
 2. 使用真實 ONNX 模型 (public/models/ball_yolo11n.onnx) 進行合成棒球幀推論驗證 +
    18.44m 垂直切面 Homography + 重力補償最小平方法測速跑分
-3. 輸出 public/data/benchmark_100.json 供前端「100 球練習判斷實驗室」即時互動回放，
+3. 將合成測試結果寫到本機 runs/synthetic_benchmark，
    並產出 ml_pipeline/BENCHMARK_100_REPORT.md 完整評估報告
 """
 import json
@@ -348,7 +348,7 @@ def run_100_pitch_benchmark() -> Dict[str, Any]:
         "pitches": pitches_data,
     }
 
-    out_json = root / "ml_pipeline" / "benchmark_100.json"
+    out_json = root / "runs" / "synthetic_benchmark" / "benchmark_100.json"
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -413,14 +413,14 @@ def run_100_pitch_benchmark() -> Dict[str, Any]:
             f"{p['detectedFrames']} 幀 | {int(round(p['confidenceScore'] * 100))}% |"
         )
 
-    report_path = root / "ml_pipeline" / "BENCHMARK_100_REPORT.md"
+    report_path = out_json.with_name("BENCHMARK_100_REPORT.md")
     report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
 
     print(
         f"[100-Pitch Benchmark] 完成 100 球跑分！MAE = {mae:.2f} km/h, RMSE = {rmse:.2f} km/h, "
         f"<=1.5km/h = {payload['summary']['within1_5KmhPct']}%"
     )
-    print(f"  -> 已輸出前端練習庫：{out_json}")
+    print(f"  -> 已輸出合成測試結果：{out_json}")
     print(f"  -> 已輸出 Markdown 報告：{report_path}")
     return payload
 

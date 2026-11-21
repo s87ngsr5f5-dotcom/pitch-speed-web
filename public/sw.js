@@ -1,5 +1,5 @@
 // 版本號：更新前端 UI 時改 APP_CACHE；重新訓練替換 .onnx 模型時改 AI_CACHE
-const APP_CACHE = 'smartscout-app-v7';
+const APP_CACHE = 'smartscout-app-v8';
 const AI_CACHE = 'pitchspeed-ai-v1';
 const VALID_CACHES = [APP_CACHE, AI_CACHE];
 
@@ -55,7 +55,7 @@ self.addEventListener('activate', (event) => {
       const keys = await caches.keys();
       await Promise.all(
         keys
-          .filter((key) => !VALID_CACHES.includes(key))
+          .filter((key) => /^(smartscout-app|pitchspeed-ai)-/.test(key) && !VALID_CACHES.includes(key))
           .map((oldKey) => caches.delete(oldKey))
       );
       await self.clients.claim();

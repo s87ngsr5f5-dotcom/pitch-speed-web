@@ -54,7 +54,9 @@ class PitchBenchmarkResult:
 
 
 class BallOnnxDetector:
-    def __init__(self, model_path: Path, conf_threshold: float = 0.35):
+    def __init__(
+        self, model_path: Path, conf_threshold: float = 0.35, *, letterbox: Optional[bool] = False
+    ):
         if not model_path.exists():
             raise FileNotFoundError(f"找不到 ONNX 模型檔：{model_path}")
 
@@ -65,11 +67,19 @@ class BallOnnxDetector:
         self.session = ort.InferenceSession(str(model_path), providers=active_providers)
         self.input_meta = self.session.get_inputs()[0]
         self.input_name = self.input_meta.name
-        self.output_name = self.session.get_outputs()[0].name
+        output = self.session.get_outputs()[0]
+        self.output_name = output.name
 
         shape = self.input_meta.shape
         self.input_size = int(shape[2]) if isinstance(shape[2], int) else 320
         self.conf_threshold = conf_threshold
+        if letterbox is None:
+            if len(output.shape) != 3 or output.shape[1] not in (5, 84):
+                raise ValueError("Expected a single-class baseball or 80-class COCO YOLO model")
+            self.letterbox = output.shape[1] == 5
+        else:
+            self.letterbox = letterbox
+        self.check_prediction_geometry = letterbox is None or letterbox
         self.active_provider = self.session.get_providers()[0]
 
     def detect(
@@ -78,9 +88,19 @@ class BallOnnxDetector:
         t0 = time.perf_counter()
         orig_h, orig_w = frame_bgr.shape[:2]
 
-        resized = cv2.resize(
-            frame_bgr, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR
-        )
+        if self.letterbox:
+            scale = min(self.input_size / orig_w, self.input_size / orig_h)
+            resize_w = max(1, int(scale * orig_w + 0.5))
+            resize_h = max(1, int(scale * orig_h + 0.5))
+        else:
+            resize_w = resize_h = self.input_size
+        pad_x = (self.input_size - resize_w) // 2
+        pad_y = (self.input_size - resize_h) // 2
+        resized = cv2.resize(frame_bgr, (resize_w, resize_h), interpolation=cv2.INTER_LINEAR)
+        if pad_x or pad_y or resize_w != self.input_size or resize_h != self.input_size:
+            canvas = np.full((self.input_size, self.input_size, 3), 114, dtype=np.uint8)
+            canvas[pad_y:pad_y + resize_h, pad_x:pad_x + resize_w] = resized
+            resized = canvas
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         tensor = (rgb.astype(np.float32) / 255.0).transpose(2, 0, 1)[np.newaxis, ...]
 
@@ -96,18 +116,25 @@ class BallOnnxDetector:
             return None, infer_ms
 
         scores = preds[4 + target_class_idx, :]
+        if self.check_prediction_geometry:
+            valid = (
+                (preds[0] >= pad_x) & (preds[0] < pad_x + resize_w)
+                & (preds[1] >= pad_y) & (preds[1] < pad_y + resize_h)
+                & (preds[2] > 0) & (preds[3] > 0) & np.isfinite(scores)
+            )
+            scores = np.where(valid, scores, -np.inf)
         best_idx = int(np.argmax(scores))
         best_score = float(scores[best_idx])
 
-        if best_score < self.conf_threshold:
+        if best_score <= self.conf_threshold:
             return None, infer_ms
 
-        scale_x = orig_w / self.input_size
-        scale_y = orig_h / self.input_size
+        scale_x = orig_w / resize_w
+        scale_y = orig_h / resize_h
 
         det = BallDetection(
-            x=float(preds[0, best_idx]) * scale_x,
-            y=float(preds[1, best_idx]) * scale_y,
+            x=(float(preds[0, best_idx]) - pad_x) * scale_x,
+            y=(float(preds[1, best_idx]) - pad_y) * scale_y,
             width=float(preds[2, best_idx]) * scale_x,
             height=float(preds[3, best_idx]) * scale_y,
             confidence=best_score,

@@ -2,14 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   SMARTSCOUT_PITCH_TYPES,
   SmartScoutPitchRecord,
-  buildRibbonPathFromMetrics,
   buildTaperedRibbonPolygon,
   computeRealPitchFromDetections,
   getPitchTypeColor,
   sampleQuadraticRibbon,
 } from '../data/smartScoutDefaultSessions';
-import { computeStrikeZoneGrid, degToClockString } from '../core/smartScoutEngine';
-import { BallDetection } from '../types';
+import { DEFAULT_TUNNEL_CONFIGS, MAX_PITCH_SAMPLE_GAP_MS } from '../core/smartScoutEngine';
+import { BallDetection, Point2D, TunnelBoxConfig } from '../types';
 
 interface VideoFrameMetadata {
   presentationTime: number;
@@ -27,12 +26,35 @@ type VideoWithRVFC = HTMLVideoElement & {
   cancelVideoFrameCallback?: (handle: number) => void;
 };
 
+let lastSentTimestampMs = 0;
+const CHECKPOINTS_KEY = 'pitch-speed-checkpoints';
+const MIN_CHECKPOINT_DISTANCE = 0.08;
+
+function readCheckpoints(cameraAngle: 'behind_pitcher' | 'behind_catcher'): TunnelBoxConfig {
+  const defaults = DEFAULT_TUNNEL_CONFIGS[cameraAngle];
+  try {
+    const saved = JSON.parse(localStorage.getItem(`${CHECKPOINTS_KEY}:${cameraAngle}`) ?? 'null');
+    if (Array.isArray(saved) && saved.length === 4 && saved.every(
+      (value) => typeof value === 'number' && value >= 0 && value <= 1,
+    ) && Math.hypot(saved[0] - saved[2], saved[1] - saved[3]) >= MIN_CHECKPOINT_DISTANCE) {
+      return {
+        releaseBox: { ...defaults.releaseBox, cx: saved[0], cy: saved[1] },
+        strikeZoneBox: { ...defaults.strikeZoneBox, cx: saved[2], cy: saved[3] },
+      };
+    }
+  } catch {
+    // Fall back to the camera guides.
+  }
+  return defaults;
+}
+
 interface SmartScoutLiveCameraProps {
   currentPitch: SmartScoutPitchRecord | null;
   cameraAngle: 'behind_pitcher' | 'behind_catcher';
   discipline: 'pitching' | 'hitting';
   distanceMeters: number;
   isWorkerReady: boolean;
+  workerError?: string;
   isBusyRef: React.MutableRefObject<boolean>;
   latestBall: BallDetection | null;
   onBackToSession: () => void;
@@ -55,6 +77,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   discipline,
   distanceMeters,
   isWorkerReady,
+  workerError,
   isBusyRef,
   latestBall,
   onBackToSession,
@@ -66,7 +89,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const videoRef = useRef<VideoWithRVFC | null>(null);
   const [hasLiveCamera, setHasLiveCamera] = useState<boolean>(false);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
-  const [selectedPitchType, setSelectedPitchType] = useState<string>('四縫線快速球');
+  const [selectedPitchType, setSelectedPitchType] = useState('未標記');
+  const [captureMessage, setCaptureMessage] = useState('');
+  const [fileEnded, setFileEnded] = useState(false);
+  const [frameSize, setFrameSize] = useState({ width: 1280, height: 720 });
   const [showRibbon, setShowRibbon] = useState<boolean>(true);
   const [showStatsCard, setShowStatsCard] = useState<boolean>(true);
   const [playbackSpeed, setPlaybackSpeed] = useState<1 | 0.5 | 0.25>(1);
@@ -75,8 +101,27 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const [liveTrackDots, setLiveTrackDots] = useState<BallDetection[]>([]);
 
   const rafRef = useRef<number | null>(null);
+  const measuredInFileRef = useRef(0);
   const activeTrackRef = useRef<BallDetection[]>([]);
   const flushTimerRef = useRef<number | null>(null);
+  const sentTimestampsRef = useRef(new Set<number>());
+  const [cameraCheckpoints, setCameraCheckpoints] = useState(() => ({
+    behind_pitcher: readCheckpoints('behind_pitcher'),
+    behind_catcher: readCheckpoints('behind_catcher'),
+  }));
+  const [fileCheckpoints, setFileCheckpoints] = useState<TunnelBoxConfig | null>(null);
+  const [calibration, setCalibration] = useState<{ release?: Point2D } | null>(null);
+  const calibrating = calibration !== null;
+  const checkpoints = uploadedVideoUrl
+    ? fileCheckpoints ?? DEFAULT_TUNNEL_CONFIGS[cameraAngle]
+    : cameraCheckpoints[cameraAngle];
+
+  const resetTrack = useCallback(() => {
+    if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = null;
+    activeTrackRef.current = [];
+    setLiveTrackDots([]);
+  }, []);
 
   // 1. 一進入即啟動相機 (getUserMedia 優先 60fps 1280x720)
   useEffect(() => {
@@ -89,16 +134,16 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const stopStream = () => {
       if (activeStream) {
         activeStream.getTracks().forEach((t) => t.stop());
+        if (video.srcObject === activeStream) video.srcObject = null;
         activeStream = null;
       }
-      if (video.srcObject) {
-        video.srcObject = null;
-      }
+
     };
 
     const startCamera = async () => {
       if (!navigator.mediaDevices?.getUserMedia) {
         setHasLiveCamera(false);
+        setCaptureMessage('無法使用鏡頭。請確認相機權限，或選擇影片。');
         return;
       }
 
@@ -140,15 +185,23 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
       if (!activeStream) {
         setHasLiveCamera(false);
+        setCaptureMessage('無法使用鏡頭。請確認相機權限，或選擇影片。');
         return;
       }
 
       video.srcObject = activeStream;
       try {
         await video.play();
-        setHasLiveCamera(true);
+        if (!cancelled) {
+          setHasLiveCamera(true);
+          setCaptureMessage('');
+        }
       } catch {
-        setHasLiveCamera(false);
+        if (!cancelled) {
+          stopStream();
+          setHasLiveCamera(false);
+          setCaptureMessage('無法播放鏡頭畫面。');
+        }
       }
     };
 
@@ -169,14 +222,41 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     let rvfcId: number | null = null;
     let rafId: number | null = null;
     let lastMediaTime = -1;
+    let timestampOffset: number | null = null;
+    const sentTimestamps = sentTimestampsRef.current;
+    const fallbackCanvas = document.createElement('canvas');
+    const resetSource = () => {
+      timestampOffset = null;
+      lastMediaTime = -1;
+      sentTimestamps.clear();
+      resetTrack();
+    };
+    resetSource();
+    video.addEventListener('seeking', resetSource);
 
-    const sendFrame = (timestampMs: number) => {
+    const captureBitmap = async () => {
+      try {
+        return await createImageBitmap(video);
+      } catch {
+        fallbackCanvas.width = video.videoWidth;
+        fallbackCanvas.height = video.videoHeight;
+        const context = fallbackCanvas.getContext('2d');
+        if (!context) throw new Error('Cannot capture video frame');
+        context.drawImage(video, 0, 0);
+        return createImageBitmap(fallbackCanvas);
+      }
+    };
+
+    const sendFrame = (mediaTime: number) => {
       if (
         !isWorkerReady ||
+        calibrating ||
+        discipline !== 'pitching' ||
         isBusyRef.current ||
         video.readyState < 2 ||
         video.paused ||
         video.ended ||
+        video.seeking ||
         video.videoWidth === 0
       ) {
         return;
@@ -184,11 +264,32 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       isBusyRef.current = true;
       const w = video.videoWidth;
       const h = video.videoHeight;
-      createImageBitmap(video)
-        .then((bmp) => onFrame(bmp, timestampMs, w, h))
-        .catch(() => {
+      const mediaTimeMs = mediaTime * 1000;
+      timestampOffset ??= lastSentTimestampMs + 1 - mediaTimeMs;
+      const offset = timestampOffset;
+      const timestampMs = mediaTimeMs + offset;
+      lastSentTimestampMs = timestampMs;
+      captureBitmap().then((bitmap) => {
+        if (stopped || offset !== timestampOffset) {
+          bitmap.close();
           isBusyRef.current = false;
-        });
+          return;
+        }
+        // Only accept worker responses from this capture source.
+        if (sentTimestamps.size >= 32) {
+          sentTimestamps.delete(sentTimestamps.values().next().value!);
+        }
+        sentTimestamps.add(timestampMs);
+        try {
+          onFrame(bitmap, timestampMs, w, h);
+        } catch (error) {
+          bitmap.close();
+          throw error;
+        }
+      }).catch(() => {
+        isBusyRef.current = false;
+        if (!stopped) setCaptureMessage('無法擷取影片畫面。');
+      });
     };
 
     if (typeof video.requestVideoFrameCallback === 'function') {
@@ -196,16 +297,18 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         if (stopped) return;
         if (meta.mediaTime !== lastMediaTime) {
           lastMediaTime = meta.mediaTime;
-          sendFrame(meta.mediaTime * 1000);
+          sendFrame(meta.mediaTime);
         }
         rvfcId = video.requestVideoFrameCallback!(onVideoFrame);
       };
       rvfcId = video.requestVideoFrameCallback(onVideoFrame);
     } else {
-      const onRaf = (now: DOMHighResTimeStamp) => {
+      const onRaf = () => {
         if (stopped) return;
-        const ts = uploadedVideoUrl ? video.currentTime * 1000 : now;
-        sendFrame(ts);
+        if (video.currentTime !== lastMediaTime) {
+          lastMediaTime = video.currentTime;
+          sendFrame(lastMediaTime);
+        }
         rafId = requestAnimationFrame(onRaf);
       };
       rafId = requestAnimationFrame(onRaf);
@@ -213,6 +316,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
     return () => {
       stopped = true;
+      sentTimestamps.clear();
+      video.removeEventListener('seeking', resetSource);
       if (rvfcId !== null && video.cancelVideoFrameCallback) {
         video.cancelVideoFrameCallback(rvfcId);
       }
@@ -220,7 +325,13 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         cancelAnimationFrame(rafId);
       }
     };
-  }, [isWorkerReady, isBusyRef, onFrame, uploadedVideoUrl]);
+  }, [calibrating, cameraAngle, discipline, isWorkerReady, isBusyRef, onFrame, resetTrack, uploadedVideoUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !uploadedVideoUrl || !isWorkerReady || discipline !== 'pitching') return;
+    void video.play().catch(() => setCaptureMessage('無法自動播放。請按「重新分析」。'));
+  }, [discipline, isWorkerReady, uploadedVideoUrl]);
 
   const captureVideoSnapshot = useCallback((): string | undefined => {
     const video = videoRef.current;
@@ -238,168 +349,68 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     }
   }, []);
 
-  const finalizeActiveTrack = useCallback(() => {
-    const track = activeTrackRef.current;
-    activeTrackRef.current = [];
-    setLiveTrackDots([]);
-
-    if (track.length < 4) return;
+  useEffect(() => {
+    if (!latestBall || !sentTimestampsRef.current.delete(latestBall.timestampMs)) return;
     const video = videoRef.current;
-    const vw = video?.videoWidth || 1280;
-    const vh = video?.videoHeight || 720;
+    if (!video || !video.videoWidth || !video.videoHeight) return;
 
-    const totalDisp = Math.hypot(
-      track[track.length - 1].x - track[0].x,
-      track[track.length - 1].y - track[0].y
-    );
-    if (totalDisp < Math.min(vw, vh) * 0.08) return;
+    const track = activeTrackRef.current;
+    const betweenSamples = track.length
+      ? latestBall.timestampMs - track[track.length - 1].timestampMs
+      : 0;
+    if (track.length && (betweenSamples <= 0 || betweenSamples > MAX_PITCH_SAMPLE_GAP_MS ||
+      latestBall.timestampMs - track[0].timestampMs > 1600)) {
+      resetTrack();
+    }
 
-    const snapshotUrl = captureVideoSnapshot();
+    const activeTrack = activeTrackRef.current;
+    activeTrack.push(latestBall);
+    setLiveTrackDots([...activeTrack]);
     const record = computeRealPitchFromDetections({
-      detections: track,
-      videoWidth: vw,
-      videoHeight: vh,
+      detections: activeTrack,
+      videoWidth: video.videoWidth,
+      videoHeight: video.videoHeight,
       cameraAngle,
       discipline,
       distanceMeters,
+      checkpoints,
       preferredPitchType: selectedPitchType,
-      snapshotUrl,
       videoUrl: uploadedVideoUrl ?? undefined,
     });
 
     if (record) {
-      onNewMeasuredPitch(record);
+      if (uploadedVideoUrl) measuredInFileRef.current += 1;
+      onNewMeasuredPitch({ ...record, snapshotUrl: captureVideoSnapshot() });
+      setCaptureMessage('');
+      resetTrack();
       setProgress(0.06);
       setIsAnimatingRibbon(true);
-    }
-  }, [
-    cameraAngle,
-    captureVideoSnapshot,
-    discipline,
-    distanceMeters,
-    onNewMeasuredPitch,
-    selectedPitchType,
-    uploadedVideoUrl,
-  ]);
-
-  useEffect(() => {
-    if (!latestBall) return;
-
-    const track = activeTrackRef.current;
-    if (track.length > 0) {
-      const prev = track[track.length - 1];
-      const dt = latestBall.timestampMs - prev.timestampMs;
-      if (dt <= 0) return;
-
-      if (dt > 260) {
-        finalizeActiveTrack();
-      } else {
-        const video = videoRef.current;
-        const maxJump = Math.max(video?.videoWidth || 1280, video?.videoHeight || 720) * 0.38;
-        const jump = Math.hypot(latestBall.x - prev.x, latestBall.y - prev.y);
-        if (jump > maxJump) return;
-      }
+      return;
     }
 
-    activeTrackRef.current.push(latestBall);
-    setLiveTrackDots([...activeTrackRef.current]);
-
-    if (flushTimerRef.current !== null) {
-      window.clearTimeout(flushTimerRef.current);
-    }
+    if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
     flushTimerRef.current = window.setTimeout(() => {
-      finalizeActiveTrack();
-    }, 280);
-  }, [latestBall, finalizeActiveTrack]);
-
-  useEffect(() => {
-    return () => {
-      if (flushTimerRef.current !== null) {
-        window.clearTimeout(flushTimerRef.current);
+      if (activeTrackRef.current.length >= 3) {
+        setCaptureMessage('未取得完整球路。請讓出手和本壘都入鏡。');
       }
-    };
-  }, []);
-
-  // 快速測試下一球按鈕（無實體相機或快速驗證物理引擎時使用）
-  const handleQuickTestNextPitch = useCallback(() => {
-    const pitchType = currentPitch ? currentPitch.pitchType : selectedPitchType;
-    const dEff = Math.max(8, distanceMeters - 1.75);
-    const flightSec =
-      pitchType === '曲球'
-        ? 0.48 + Math.random() * 0.05
-        : pitchType === '滑球' || pitchType === '變速球'
-          ? 0.43 + Math.random() * 0.04
-          : 0.37 + Math.random() * 0.05;
-
-    const speedKmh = Number((((dEff / flightSec) * 3.6) / 0.955).toFixed(1));
-    const plateSpeedKmh = Number((speedKmh * 0.916).toFixed(1));
-
-    const vb = Number(
-      (pitchType === '曲球'
-        ? -35 + Math.random() * 14
-        : pitchType === '滑球'
-          ? 4 + Math.random() * 12
-          : 44 + Math.random() * 18
-      ).toFixed(1)
-    );
-    const hb = Number(
-      (pitchType === '滑球' || pitchType === '曲球'
-        ? -26 + Math.random() * 14
-        : 16 + Math.random() * 20
-      ).toFixed(1)
-    );
-
-    const eff =
-      pitchType === '滑球'
-        ? Math.round(52 + Math.random() * 15)
-        : Math.round(78 + Math.random() * 15);
-    const spinAxisDeg = Math.round((Math.atan2(vb, hb) * 180) / Math.PI);
-    const sd = degToClockString(spinAxisDeg);
-    const activeSpin = Math.round(
-      Math.max(950, Math.min(2650, Math.hypot(vb, hb) * 20 + speedKmh * 7.2))
-    );
-    const totalSpin = Math.round(activeSpin / (eff / 100));
-    const gyro = Math.round((Math.acos(eff / 100) * 180) / Math.PI);
-    const plateX = Number((-16 + Math.random() * 32).toFixed(1));
-    const plateY = Number((52 + Math.random() * 44).toFixed(1));
-    const { zoneId, isStrike } = computeStrikeZoneGrid(plateX, plateY);
-
-    onNewMeasuredPitch({
-      pitchType,
-      pitchColor: getPitchTypeColor(pitchType),
-      cameraAngle,
-      speedKmh,
-      plateSpeedKmh,
-      verticalBreakCm: vb,
-      horizontalBreakCm: hb,
-      efficiencyPct: eff,
-      spinDirection: sd,
-      spinAxisDeg,
-      gyroDegree: gyro,
-      activeSpinRpm: activeSpin,
-      totalSpinRpm: totalSpin,
-      plateXCm: plateX,
-      plateYCm: plateY,
-      zoneId,
-      isStrike,
-      snapshotUrl: captureVideoSnapshot(),
-      videoUrl: uploadedVideoUrl ?? undefined,
-      isHitting: discipline === 'hitting',
-      ribbonPath: buildRibbonPathFromMetrics(cameraAngle, vb, hb, plateX, plateY),
-    });
-
-    setProgress(0.06);
-    setIsAnimatingRibbon(true);
+      resetTrack();
+    }, uploadedVideoUrl ? 500 : 180);
   }, [
     cameraAngle,
     captureVideoSnapshot,
-    currentPitch,
+    checkpoints,
     discipline,
     distanceMeters,
+    latestBall,
     onNewMeasuredPitch,
+    resetTrack,
     selectedPitchType,
     uploadedVideoUrl,
   ]);
+
+  useEffect(() => () => {
+    if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!isAnimatingRibbon) {
@@ -452,10 +463,67 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const handleVideoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (uploadedVideoUrl) URL.revokeObjectURL(uploadedVideoUrl);
-    activeTrackRef.current = [];
-    setLiveTrackDots([]);
+    e.currentTarget.value = '';
+    setCaptureMessage('');
+    setHasLiveCamera(false);
+    setFileEnded(false);
+    measuredInFileRef.current = 0;
+    setCalibration(null);
+    setFileCheckpoints(null);
+    resetTrack();
     setUploadedVideoUrl(URL.createObjectURL(file));
+  };
+
+  const restartAnalysis = () => {
+    const video = videoRef.current;
+    if (!video || !isWorkerReady) return;
+    resetTrack();
+    setFileEnded(false);
+    measuredInFileRef.current = 0;
+    setCaptureMessage('');
+    video.currentTime = 0;
+    void video.play().catch(() => setCaptureMessage('無法播放這部影片。'));
+  };
+
+  const applyCalibration = (event: React.MouseEvent<SVGRectElement>) => {
+    if (!calibration) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    const point = {
+      x: (event.clientX - bounds.left) / bounds.width,
+      y: (event.clientY - bounds.top) / bounds.height,
+    };
+    const { release } = calibration;
+    if (!release) {
+      setCalibration({ release: point });
+      return;
+    }
+    if (Math.hypot(release.x - point.x, release.y - point.y) < MIN_CHECKPOINT_DISTANCE) {
+      setCaptureMessage('兩個測速點太近，請重新點選本壘位置。');
+      return;
+    }
+
+    const corrected = {
+      releaseBox: { ...checkpoints.releaseBox, cx: release.x, cy: release.y },
+      strikeZoneBox: { ...checkpoints.strikeZoneBox, cx: point.x, cy: point.y },
+    };
+    if (uploadedVideoUrl) {
+      setFileCheckpoints(corrected);
+      restartAnalysis();
+    } else {
+      setCameraCheckpoints((previous) => ({ ...previous, [cameraAngle]: corrected }));
+      try {
+        localStorage.setItem(
+          `${CHECKPOINTS_KEY}:${cameraAngle}`,
+          JSON.stringify([release.x, release.y, point.x, point.y]),
+        );
+      } catch {
+        // Keep the new checkpoints for this session.
+      }
+    }
+    resetTrack();
+    setCaptureMessage('');
+    setCalibration(null);
   };
 
   const handleDownloadSnapshot = () => {
@@ -503,7 +571,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       ctx.fillText(`${currentPitch.speedKmh.toFixed(1)} km/h`, 46, stageH - 230);
       ctx.font = 'bold 20px sans-serif';
       ctx.fillText(
-        `VB ${currentPitch.verticalBreakCm}cm | HB ${currentPitch.horizontalBreakCm}cm | ${currentPitch.totalSpinRpm} rpm | SD ${currentPitch.spinDirection}`,
+        currentPitch.measurement
+          ? `${Math.round(currentPitch.measurement.flightTimeMs)} ms | ${currentPitch.measurement.detectionCount} 幀`
+          : currentPitch.pitchType,
         46,
         stageH - 150
       );
@@ -515,9 +585,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     link.click();
   };
 
-  const videoEl = videoRef.current;
-  const vw = videoEl?.videoWidth || 1280;
-  const vh = videoEl?.videoHeight || 720;
+  const { width: vw, height: vh } = frameSize;
 
   return (
     <div className="relative mx-auto flex h-[calc(100dvh-64px)] max-h-[920px] w-full max-w-[460px] flex-col overflow-hidden rounded-none sm:rounded-3xl bg-slate-950 shadow-xl select-none">
@@ -527,9 +595,26 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         src={uploadedVideoUrl ?? undefined}
         playsInline
         muted
-        autoPlay
-        onEnded={() => finalizeActiveTrack()}
-        className="absolute inset-0 h-full w-full object-cover bg-slate-950"
+        autoPlay={!uploadedVideoUrl}
+        onEnded={() => {
+          setFileEnded(true);
+          if (measuredInFileRef.current === 0) {
+            setCaptureMessage('影片沒有取得完整球路。請調整測速框，或選用涵蓋出手和本壘的影片。');
+          }
+        }}
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          setFrameSize({ width: video.videoWidth, height: video.videoHeight });
+          video.playbackRate = uploadedVideoUrl ? 0.5 : 1;
+        }}
+        onResize={(event) => {
+          const video = event.currentTarget;
+          if (video.videoWidth && video.videoHeight) {
+            setFrameSize({ width: video.videoWidth, height: video.videoHeight });
+          }
+        }}
+        onError={() => setCaptureMessage('無法播放這部影片，請改用支援的 MP4 影片。')}
+        className="absolute inset-0 h-full w-full object-contain bg-slate-950"
       />
 
       {/* 無實體相機時顯示清爽的縱深投球通道對準格線 */}
@@ -564,18 +649,25 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             }`}
           />
           <h2 className="text-base font-bold tracking-wide drop-shadow">
-            {currentPitch ? `投球 #${currentPitch.pitchNumber}` : '自動測速中'}
+            {workerError ? '模型無法啟動' : isWorkerReady ? '投球追蹤' : '正在載入模型'}
           </h2>
         </div>
 
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={handleQuickTestNextPitch}
-            className="rounded-xl bg-[#0b72b9] hover:bg-[#0962a0] px-2.5 py-1.5 text-xs font-extrabold text-white shadow transition active:scale-95"
-          >
-            ⚡ 測試下一球
-          </button>
+          {uploadedVideoUrl && (
+            <button
+              type="button"
+              onClick={() => {
+                resetTrack();
+                setCalibration(null);
+                setCaptureMessage('');
+                setUploadedVideoUrl(null);
+              }}
+              className="rounded-xl bg-white/15 px-2.5 py-1.5 text-xs font-bold text-white"
+            >
+              開啟鏡頭
+            </button>
+          )}
 
           <label
             title="上傳影片"
@@ -603,10 +695,42 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         </div>
       </div>
 
+      <div className="relative z-40 mx-auto max-w-[92%] rounded-lg bg-black/65 px-3 py-1.5 text-center text-xs text-white">
+        <p role="status">
+          {workerError || captureMessage || (discipline === 'hitting'
+            ? '目前支援投球測速。請在設定中切換為投球。'
+            : calibration
+              ? calibration.release ? '點選球通過本壘的位置' : '點選投手放球的位置'
+              : '固定鏡頭，讓出手位置與本壘對準測速框。')}
+        </p>
+        {uploadedVideoUrl && fileEnded && !calibrating && (
+          <button
+            type="button"
+            onClick={restartAnalysis}
+            className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
+          >
+            重新分析
+          </button>
+        )}
+        {!workerError && discipline === 'pitching' && (hasLiveCamera || uploadedVideoUrl) && (
+          <button
+            type="button"
+            onClick={() => {
+              resetTrack();
+              setCaptureMessage('');
+              setCalibration(calibrating ? null : {});
+            }}
+            className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
+          >
+            {calibrating ? '取消調整' : '調整測速框'}
+          </button>
+        )}
+      </div>
+
       {/* 3D 漸變紅色彗星彩帶軌跡 (#7f1022 -> #ef233c) + 末端立體小白球(含縫線與陰影) */}
       <svg
-        viewBox={`0 0 ${stageW} ${stageH}`}
-        className="pointer-events-none absolute inset-0 z-10 h-full w-full"
+        viewBox={`0 0 ${vw} ${vh}`}
+        className={`absolute inset-0 h-full w-full ${calibrating ? 'z-30' : 'z-10 pointer-events-none'}`}
       >
         <defs>
           <linearGradient id="liveRibbonGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -619,7 +743,35 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           </filter>
         </defs>
 
-        {showRibbon && currentPitch && ribbonSamples.length >= 2 && (
+        <g transform={`scale(${vw / stageW} ${vh / stageH})`}>
+        {calibrating && (
+          <rect width={stageW} height={stageH} fill="transparent" onClick={applyCalibration} />
+        )}
+        {discipline === 'pitching' && [checkpoints.releaseBox, checkpoints.strikeZoneBox].map((box, i) => (
+          <rect
+            key={i}
+            x={(box.cx - box.width / 2) * stageW}
+            y={(box.cy - box.height / 2) * stageH}
+            width={box.width * stageW}
+            height={box.height * stageH}
+            fill="none"
+            stroke="white"
+            strokeDasharray="6 6"
+            strokeWidth="2"
+            opacity="0.75"
+            pointerEvents="none"
+          />
+        ))}
+        {calibration?.release && (
+          <circle
+            cx={calibration.release.x * stageW}
+            cy={calibration.release.y * stageH}
+            r={8}
+            fill="#38bdf8"
+            pointerEvents="none"
+          />
+        )}
+        {!calibrating && showRibbon && currentPitch && ribbonSamples.length >= 2 && (
           <g filter="url(#liveRibbonShadow)">
             <polygon points={polygonPoints} fill="url(#liveRibbonGrad)" />
             {ribbonSamples.map((s, idx) => (
@@ -684,6 +836,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             strokeWidth="2"
           />
         ))}
+        </g>
       </svg>
 
       {/* 右側 4 顆懸浮圓形控制鈕 */}
@@ -762,7 +915,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             {/* 頂部：初速 km/h + 球種下拉選單 */}
             <div className="flex items-center justify-between gap-2">
               <div>
-                <div className="text-xs font-medium text-neutral-300">初速</div>
+                <div className="text-xs font-medium text-neutral-300">預估初速</div>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-[42px] font-bold leading-tight tracking-tight tabular-nums">
                     {currentPitch ? currentPitch.speedKmh.toFixed(1) : '--.-'}
@@ -796,104 +949,11 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
               </div>
             </div>
 
-            {/* 2x4 八格網格：
-                Row 1: VB [cm] 垂直變化量 | HB [cm] 水平變化量 | E [%] 效率 | SD 旋轉方向(附箭頭方向圓圈)
-                Row 2: GD [°] 陀螺角度 | AS [rpm] 有效轉速 | S [rpm] 轉速 | 九宮格進壘小圖示(標示紅點落點)
-            */}
-            <div className="mt-2 grid grid-cols-4 gap-1.5 text-center">
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">VB [cm] 垂直</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {currentPitch ? currentPitch.verticalBreakCm.toFixed(1) : '--'}
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">HB [cm] 水平</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {currentPitch ? currentPitch.horizontalBreakCm.toFixed(1) : '--'}
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">E [%] 效率</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {currentPitch ? `${currentPitch.efficiencyPct}%` : '--'}
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1 flex flex-col items-center justify-center">
-                <div className="text-[10px] text-neutral-400">SD 旋轉方向</div>
-                <div className="mt-0.5 flex items-center gap-1">
-                  <span className="text-base font-bold tabular-nums">
-                    {currentPitch ? currentPitch.spinDirection : '--:--'}
-                  </span>
-                  {currentPitch && (
-                    <span
-                      className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-white/50 text-[9px]"
-                      style={{
-                        transform: `rotate(${90 - (currentPitch.spinAxisDeg ?? 45)}deg)`,
-                      }}
-                    >
-                      ↑
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">GD [°] 陀螺角</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {currentPitch ? `${currentPitch.gyroDegree}°` : '--'}
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">AS [rpm] 有效</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {currentPitch ? currentPitch.activeSpinRpm : '--'}
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-white/5 py-1.5 px-1">
-                <div className="text-[10px] text-neutral-400">S [rpm] 轉速</div>
-                <div className="mt-0.5 text-lg font-bold tabular-nums">
-                  {currentPitch ? currentPitch.totalSpinRpm : '--'}
-                </div>
-              </div>
-
-              {/* 九宮格進壘小圖示（標示紅點落點） */}
-              <div className="rounded-xl bg-white/5 py-1 px-1 flex flex-col items-center justify-center">
-                <div className="text-[10px] text-neutral-400">
-                  進壘 #{currentPitch ? currentPitch.zoneId : '-'}
-                </div>
-                <svg width="26" height="28" viewBox="0 0 30 32" className="mt-0.5">
-                  <rect
-                    x="4"
-                    y="3"
-                    width="22"
-                    height="25"
-                    fill="none"
-                    stroke="rgba(255,255,255,0.65)"
-                    strokeWidth="1.4"
-                  />
-                  <line x1="11.3" y1="3" x2="11.3" y2="28" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  <line x1="18.6" y1="3" x2="18.6" y2="28" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  <line x1="4" y1="11.3" x2="26" y2="11.3" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  <line x1="4" y1="19.6" x2="26" y2="19.6" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-                  {currentPitch && (
-                    <circle
-                      cx={Math.max(2, Math.min(28, 15 + (currentPitch.plateXCm / 21.6) * 11))}
-                      cy={Math.max(2, Math.min(30, 15.5 - ((currentPitch.plateYCm - 76) / 30) * 12))}
-                      r="3.2"
-                      fill="#ef233c"
-                      stroke="#ffffff"
-                      strokeWidth="1"
-                    />
-                  )}
-                </svg>
-              </div>
-            </div>
+            {currentPitch?.measurement && (
+              <p className="mt-2 text-xs text-neutral-300">
+                飛行 {Math.round(currentPitch.measurement.flightTimeMs)} ms · 偵測 {currentPitch.measurement.detectionCount} 幀
+              </p>
+            )}
           </div>
         )}
 
