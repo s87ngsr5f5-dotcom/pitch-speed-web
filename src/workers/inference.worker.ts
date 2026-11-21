@@ -29,12 +29,30 @@ async function initModel(
   ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
   inputBuffer = new Float32Array(3 * inputSize * inputSize);
 
+  let modelData: string | ArrayBuffer = modelUrl;
+  try {
+    if ('caches' in self) {
+      const cached = await caches.match(modelUrl);
+      if (cached && cached.ok) {
+        modelData = await cached.arrayBuffer();
+      }
+    }
+    if (typeof modelData === 'string') {
+      const resp = await fetch(modelUrl);
+      if (resp.ok) {
+        modelData = await resp.arrayBuffer();
+      }
+    }
+  } catch {
+    modelData = modelUrl;
+  }
+
   let activeBackend = 'WASM';
   if ('gpu' in navigator) {
     try {
-      session = await ort.InferenceSession.create(modelUrl, {
+      session = await ort.InferenceSession.create(modelData, {
         executionProviders: ['webgpu'],
-        graphOptimizationLevel: 'all',
+        graphOptimizationLevel: 'basic',
       });
       activeBackend = 'WebGPU';
     } catch {
@@ -42,9 +60,9 @@ async function initModel(
     }
   }
   if (!session) {
-    session = await ort.InferenceSession.create(modelUrl, {
+    session = await ort.InferenceSession.create(modelData, {
       executionProviders: ['wasm'],
-      graphOptimizationLevel: 'all',
+      graphOptimizationLevel: 'basic',
     });
   }
   const output = session.outputMetadata[0];

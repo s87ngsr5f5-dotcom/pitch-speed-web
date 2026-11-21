@@ -126,15 +126,16 @@ export function estimateAutomaticPitchFlight({
       const lastDet = detections[e];
       const startSize = Math.max(firstDet.width, firstDet.height);
       const endSize = Math.max(lastDet.width, lastDet.height);
-      const endMinSize = Math.min(lastDet.width, lastDet.height);
       const sizeRatio = Math.max(startSize / Math.max(1, endSize), endSize / Math.max(1, startSize));
-      const hasEndStop = e < detections.length - 1 || (startSize > endSize ? endMinSize <= 28.4 : endSize >= 50.5);
+      // Scale-invariant stop check: either a stationary catch frame was observed,
+      // or the ball has tapered across the full 3D tunnel (sizeRatio >= 1.50, independent of camera distance).
+      const hasEndStop = e < detections.length - 1 || sizeRatio >= 1.50;
       const first = points[s];
       const last = points[e];
       const span = Math.hypot(last.x - first.x, last.y - first.y);
       const releasePadMs = s === 0 && steps[s]?.dt > 45 ? 33.37 : 0;
       const catchPadMs =
-        e === detections.length - 1 && steps[e - 1]?.dt > 45 && endMinSize <= 28.1 ? 33.37 : 0;
+        e === detections.length - 1 && steps[e - 1]?.dt > 45 && sizeRatio >= 1.55 ? 33.37 : 0;
       const flightTimeMs = lastDet.timestampMs - firstDet.timestampMs - releasePadMs - catchPadMs;
       const speedKmh = (distance * 3600) / flightTimeMs / 0.955;
       let validSteps = true;

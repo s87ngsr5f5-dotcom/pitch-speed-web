@@ -102,10 +102,13 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 720 });
   const [showRibbon, setShowRibbon] = useState<boolean>(true);
   const [showStatsCard, setShowStatsCard] = useState<boolean>(true);
+  const [dismissedPitchId, setDismissedPitchId] = useState<string | null>(null);
   const [playbackSpeed, setPlaybackSpeed] = useState<1 | 0.5 | 0.25>(1);
   const [progress, setProgress] = useState<number>(1);
   const [isAnimatingRibbon, setIsAnimatingRibbon] = useState<boolean>(false);
   const [liveTrackDots, setLiveTrackDots] = useState<BallDetection[]>([]);
+  const displayPitch =
+    currentPitch && currentPitch.id !== dismissedPitchId ? currentPitch : null;
 
   const rafRef = useRef<number | null>(null);
   const detectedInFileRef = useRef(0);
@@ -503,10 +506,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
   const ribbonSamples = useMemo(
     () =>
-      currentPitch
-        ? sampleQuadraticRibbon(currentPitch.ribbonPath, stageW, stageH, progress)
+      displayPitch
+        ? sampleQuadraticRibbon(displayPitch.ribbonPath, stageW, stageH, progress)
         : [],
-    [currentPitch, progress]
+    [displayPitch, progress]
   );
 
   const polygonPoints = useMemo(
@@ -534,6 +537,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     detectedInFileRef.current = 0;
     setCalibration(null);
     setFileCheckpoints(null);
+    setDismissedPitchId(currentPitch?.id ?? null);
     resetTrack();
     setRegion(null); setChoosingRegion(false); setCorner(null);
     setUploadedVideoUrl(URL.createObjectURL(file));
@@ -542,12 +546,14 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const restartAnalysis = () => {
     const video = videoRef.current;
     if (!video || !isWorkerReady) return;
+    setDismissedPitchId(currentPitch?.id ?? null);
     resetTrack();
     setFileEnded(false);
     measuredInFileRef.current = 0;
     detectedInFileRef.current = 0;
     setCaptureMessage('');
     if (video.readyState >= 1) video.currentTime = 0;
+    video.playbackRate = 0.5;
     void video.play().catch(() => setCaptureMessage(
       '無法播放這部影片。請試用 H.264 編碼的 MP4。'
     ));
@@ -749,10 +755,20 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5">
+          {displayPitch && (
+            <button
+              type="button"
+              onClick={() => setDismissedPitchId(displayPitch.id)}
+              className="rounded-full bg-black/45 border border-white/25 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-black/65 transition"
+            >
+              ✕ 清除軌跡
+            </button>
+          )}
           {uploadedVideoUrl && (
             <button
               type="button"
               onClick={() => {
+                setDismissedPitchId(currentPitch?.id ?? null);
                 resetTrack();
                 setCalibration(null);
                 setCaptureMessage('');
@@ -1082,10 +1098,12 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             {/* 頂部：初速 km/h + 球種下拉選單 */}
             <div className="flex items-center justify-between gap-2">
               <div>
-                <div className="text-xs font-medium text-neutral-300">預估初速</div>
+                <div className="text-xs font-medium text-neutral-300">
+                  預估初速 · 距離 {distanceMeters}m
+                </div>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-[42px] font-bold leading-tight tracking-tight tabular-nums">
-                    {currentPitch ? currentPitch.speedKmh.toFixed(1) : '--.-'}
+                    {displayPitch ? displayPitch.speedKmh.toFixed(1) : '--.-'}
                   </span>
                   <span className="text-base font-medium text-neutral-300">km/h</span>
                 </div>
@@ -1093,16 +1111,16 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
               <div>
                 <select
-                  value={currentPitch ? currentPitch.pitchType : selectedPitchType}
+                  value={displayPitch ? displayPitch.pitchType : selectedPitchType}
                   onChange={(e) => {
                     setSelectedPitchType(e.target.value);
-                    if (currentPitch) {
-                      onChangePitchType(currentPitch.id, e.target.value);
+                    if (displayPitch) {
+                      onChangePitchType(displayPitch.id, e.target.value);
                     }
                   }}
                   style={{
                     backgroundColor: getPitchTypeColor(
-                      currentPitch ? currentPitch.pitchType : selectedPitchType
+                      displayPitch ? displayPitch.pitchType : selectedPitchType
                     ),
                   }}
                   className="rounded-lg px-3.5 py-1.5 text-xs font-bold text-white shadow-md focus:outline-none cursor-pointer"
@@ -1116,9 +1134,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
               </div>
             </div>
 
-            {currentPitch?.measurement && (
+            {displayPitch?.measurement && (
               <p className="mt-2 text-xs text-neutral-300">
-                飛行 {Math.round(currentPitch.measurement.flightTimeMs)} ms · 偵測 {currentPitch.measurement.detectionCount} 幀
+                飛行 {Math.round(displayPitch.measurement.flightTimeMs)} ms · 偵測 {displayPitch.measurement.detectionCount} 幀
               </p>
             )}
           </div>
@@ -1128,7 +1146,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         <div className="flex items-center gap-2.5 px-1">
           <button
             type="button"
-            disabled={!currentPitch}
+            disabled={!displayPitch}
             onClick={() => {
               if (progress >= 0.99) setProgress(0.05);
               setIsAnimatingRibbon((v) => !v);
@@ -1143,7 +1161,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             max={1}
             step={0.01}
             value={progress}
-            disabled={!currentPitch}
+            disabled={!displayPitch}
             onChange={(e) => {
               setIsAnimatingRibbon(false);
               setProgress(Number(e.target.value));
