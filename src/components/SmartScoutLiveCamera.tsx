@@ -95,6 +95,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const [fileEnded, setFileEnded] = useState(false);
   const [filePlaying, setFilePlaying] = useState(false);
   const [reviewingFlight, setReviewingFlight] = useState(false);
+  const [region, setRegion] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [choosingRegion, setChoosingRegion] = useState(false);
+  const [corner, setCorner] = useState<Point2D | null>(null);
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 720 });
   const [showRibbon, setShowRibbon] = useState<boolean>(true);
   const [showStatsCard, setShowStatsCard] = useState<boolean>(true);
@@ -104,6 +107,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const [liveTrackDots, setLiveTrackDots] = useState<BallDetection[]>([]);
 
   const rafRef = useRef<number | null>(null);
+  const detectedInFileRef = useRef(0);
   const measuredInFileRef = useRef(0);
   const activeTrackRef = useRef<BallDetection[]>([]);
   const flushTimerRef = useRef<number | null>(null);
@@ -239,6 +243,18 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     video.addEventListener('seeking', resetSource);
 
     const captureBitmap = async () => {
+      if (region) {
+        const cropWidth = Math.max(1, Math.round(region.width * video.videoWidth));
+        const cropHeight = Math.max(1, Math.round(region.height * video.videoHeight));
+        if (fallbackCanvas.width !== cropWidth) fallbackCanvas.width = cropWidth;
+        if (fallbackCanvas.height !== cropHeight) fallbackCanvas.height = cropHeight;
+        const ctx = fallbackCanvas.getContext('2d');
+        if (!ctx) throw new Error('Cannot crop video frame');
+        ctx.drawImage(video, region.x * video.videoWidth, region.y * video.videoHeight,
+          region.width * video.videoWidth, region.height * video.videoHeight,
+          0, 0, fallbackCanvas.width, fallbackCanvas.height);
+        return createImageBitmap(fallbackCanvas);
+      }
       try {
         return await createImageBitmap(video);
       } catch {
@@ -254,7 +270,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const sendFrame = (mediaTime: number) => {
       if (
         !isWorkerReady ||
-        reviewingFlight ||
+        choosingRegion || reviewingFlight ||
         calibrating ||
         discipline !== 'pitching' ||
         isBusyRef.current ||
@@ -286,7 +302,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         }
         sentTimestamps.add(timestampMs);
         try {
-          onFrame(bitmap, timestampMs, w, h);
+          onFrame(bitmap, timestampMs, region ? bitmap.width : w, region ? bitmap.height : h);
         } catch (error) {
           bitmap.close();
           throw error;
@@ -330,7 +346,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         cancelAnimationFrame(rafId);
       }
     };
-  }, [calibrating, cameraAngle, discipline, isWorkerReady, isBusyRef, onFrame, resetTrack, reviewingFlight, uploadedVideoUrl]);
+  }, [region, choosingRegion, calibrating, cameraAngle, discipline, isWorkerReady, isBusyRef, onFrame, resetTrack, reviewingFlight, uploadedVideoUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -373,7 +389,18 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     }
 
     const activeTrack = activeTrackRef.current;
-    activeTrack.push(latestBall);
+    if (region) {
+      const width = region.width * video.videoWidth;
+      const height = region.height * video.videoHeight;
+      const sx = width / Math.max(1, Math.round(width));
+      const sy = height / Math.max(1, Math.round(height));
+      if (latestBall.x < 0 || latestBall.x * sx > width || latestBall.y < 0 || latestBall.y * sy > height) return;
+      activeTrack.push({ ...latestBall, x: region.x * video.videoWidth + latestBall.x * sx,
+        y: region.y * video.videoHeight + latestBall.y * sy, width: latestBall.width * sx, height: latestBall.height * sy });
+    } else {
+      activeTrack.push(latestBall);
+    }
+    if (uploadedVideoUrl) detectedInFileRef.current += 1;
     setLiveTrackDots([...activeTrack]);
     const record = computeRealPitchFromDetections({
       detections: activeTrack,
@@ -410,7 +437,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     manualCheckpoints,
     discipline,
     distanceMeters,
-    latestBall,
+    latestBall, region,
     onNewMeasuredPitch,
     resetTrack,
     selectedPitchType,
@@ -483,9 +510,11 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     setFileEnded(false);
     setFilePlaying(false);
     measuredInFileRef.current = 0;
+    detectedInFileRef.current = 0;
     setCalibration(null);
     setFileCheckpoints(null);
     resetTrack();
+    setRegion(null); setChoosingRegion(false); setCorner(null);
     setUploadedVideoUrl(URL.createObjectURL(file));
   };
 
@@ -495,6 +524,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     resetTrack();
     setFileEnded(false);
     measuredInFileRef.current = 0;
+    detectedInFileRef.current = 0;
     setCaptureMessage('');
     if (video.readyState >= 1) video.currentTime = 0;
     void video.play().catch(() => setCaptureMessage(
@@ -620,7 +650,11 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           setFilePlaying(false);
           setFileEnded(true);
           if (measuredInFileRef.current === 0) {
-            setCaptureMessage('影片沒有取得完整球路。若投手和捕手都入鏡，請試用「調整測速框」再重新分析。');
+            const area = region ? '所選範圍內' : '全畫面';
+            const detected = detectedInFileRef.current;
+            setCaptureMessage(detected
+              ? `${area}在 ${detected} 幀找到疑似球的位置，但無法確認完整球路。可重選範圍或手動核對。`
+              : `${area}沒有偵測到球。請確認球路在畫面內，或手動核對影片時間。`);
           }
         }}
         onLoadedMetadata={(event) => {
@@ -641,6 +675,22 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         className="absolute inset-0 h-full w-full object-contain bg-slate-950"
       />
 
+      {(region || choosingRegion) && <svg viewBox={`0 0 ${vw} ${vh}`}
+        className={`absolute inset-0 h-full w-full ${choosingRegion ? 'z-30' : 'pointer-events-none z-10'}`}>
+        {region && <rect x={region.x * vw} y={region.y * vh} width={region.width * vw} height={region.height * vh}
+          fill="none" stroke="#34d399" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
+        {corner && <circle cx={corner.x * vw} cy={corner.y * vh} r={vw / 100} fill="#34d399" />}
+        {choosingRegion && <rect width={vw} height={vh} fill="transparent" onClick={event => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const x = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
+          const y = Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height));
+          if (!corner) { setCorner({ x, y }); return; }
+          const width = Math.abs(x - corner.x), height = Math.abs(y - corner.y);
+          if (width * vw < 4 || height * vh < 4) { setCaptureMessage('範圍太小，請重新點選對角。'); return; }
+          setRegion({ x: Math.min(x, corner.x), y: Math.min(y, corner.y), width, height });
+          setCorner(null); setChoosingRegion(false); setCaptureMessage('已套用球路範圍。');
+        }} />}
+      </svg>}
       {/* 無實體相機時顯示清爽的縱深投球通道對準格線 */}
       {!hasLiveCamera && !uploadedVideoUrl && (
         <div
@@ -685,6 +735,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
                 resetTrack();
                 setCalibration(null);
                 setCaptureMessage('');
+                setRegion(null); setChoosingRegion(false); setCorner(null);
                 setUploadedVideoUrl(null);
               }}
               className="rounded-xl bg-white/15 px-2.5 py-1.5 text-xs font-bold text-white"
@@ -729,7 +780,17 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
                 ? '使用你設定的出手與本壘位置。'
                 : '自動辨識出手和接球。請固定鏡頭，讓投手、球路與捕手都入鏡。')}
         </p>
-        {uploadedVideoUrl && !filePlaying && !calibrating && !workerError && (
+        {(uploadedVideoUrl || hasLiveCamera) && !calibrating && discipline === 'pitching' && <>
+          <button type="button" className="mt-1 rounded px-2 py-1 text-sky-200 underline"
+            onClick={() => {
+              if (uploadedVideoUrl) videoRef.current?.pause();
+              resetTrack(); setCorner(null); setChoosingRegion(!choosingRegion); setCaptureMessage('');
+            }}>{choosingRegion ? '取消框選' : region ? '重選球路範圍' : '選取球路範圍'}</button>
+          {region && !choosingRegion && <button type="button" className="px-2 text-sky-200 underline"
+            onClick={() => { setRegion(null); resetTrack(); }}>使用全畫面</button>}
+          {choosingRegion && <p>{corner ? '再點對角，完成選取' : '點選球路範圍的一角，讓出手到接球都在框內'}</p>}
+        </>}
+        {!choosingRegion && uploadedVideoUrl && !filePlaying && !calibrating && !workerError && (
           <button
             type="button"
             onClick={restartAnalysis}
@@ -739,7 +800,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             {!isWorkerReady ? '等待模型載入' : fileEnded ? '重新分析' : '播放並分析'}
           </button>
         )}
-        {!workerError && discipline === 'pitching' && (hasLiveCamera || uploadedVideoUrl) && (
+        {!choosingRegion && !workerError && discipline === 'pitching' && (hasLiveCamera || uploadedVideoUrl) && (
           <button
             type="button"
             onClick={() => {
@@ -776,7 +837,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             改回自動辨識
           </button>
         )}
-        {uploadedVideoUrl && !calibrating && (
+        {uploadedVideoUrl && !calibrating && !choosingRegion && (
           <button type="button" className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
             onClick={() => { videoRef.current?.pause(); resetTrack(); setReviewingFlight(true); }}>
             手動核對影片時間
