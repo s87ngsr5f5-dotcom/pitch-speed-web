@@ -1,0 +1,2 @@
+# Run `python ml_pipeline/export_model.py --weights yolo11n.pt --imgsz 320`
+# to generate `ball_yolo11n.onnx` inside this directory.

@@ -1,0 +1,9 @@
+ultralytics>=8.3.0
+onnx>=1.16.0
+onnxslim>=0.1.35
+onnxruntime>=1.19.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+pyyaml>=6.0.1
+roboflow>=1.1.40
+yt-dlp>=2024.8.6

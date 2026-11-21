@@ -1,0 +1,25 @@
+{
+  "name": "PitchSpeed Web 18.44m 棒球測速",
+  "short_name": "PitchSpeed",
+  "description": "支援 iOS 鏡頭與慢動作影片的 18.44m 網頁版即時棒球測速儀",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
