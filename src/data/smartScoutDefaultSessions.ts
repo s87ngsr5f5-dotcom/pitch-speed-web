@@ -1,5 +1,5 @@
 import { BallDetection, TunnelBoxConfig } from '../types';
-import { estimatePitchFlight } from '../core/smartScoutEngine';
+import { estimateAutomaticPitchFlight, estimatePitchFlight } from '../core/smartScoutEngine';
 
 export interface SmartScoutPitchRecord {
   id: string;
@@ -22,7 +22,7 @@ export interface SmartScoutPitchRecord {
   plateYCm?: number;
   zoneId?: number;
   isStrike?: boolean;
-  measurement?: { flightTimeMs: number; detectionCount: number };
+  measurement?: { flightTimeMs: number; detectionCount: number; automaticEndpoints?: boolean };
   snapshotUrl?: string;      // 實測當下擷取之相機真實畫面
   videoUrl?: string;         // 使用者上傳之真實影片
   ribbonPath: {
@@ -169,7 +169,8 @@ export function computeRealPitchFromDetections(params: {
   videoUrl?: string;
 }): Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'> | null {
   if (params.discipline !== 'pitching') return null;
-  const result = estimatePitchFlight(params);
+  const automaticEndpoints = !params.checkpoints;
+  const result = automaticEndpoints ? estimateAutomaticPitchFlight(params) : estimatePitchFlight(params);
   if (!result) return null;
 
   const { videoWidth, videoHeight, cameraAngle, preferredPitchType, snapshotUrl, videoUrl } = params;
@@ -189,7 +190,7 @@ export function computeRealPitchFromDetections(params: {
     pitchColor: getPitchTypeColor(pitchType),
     cameraAngle,
     speedKmh,
-    measurement: { flightTimeMs, detectionCount },
+    measurement: { flightTimeMs, detectionCount, automaticEndpoints },
     snapshotUrl,
     videoUrl,
     ribbonPath: {

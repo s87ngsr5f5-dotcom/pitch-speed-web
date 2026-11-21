@@ -36,6 +36,55 @@ interface PitchFlightParams {
 
 export const MAX_PITCH_SAMPLE_GAP_MS = 100;
 
+/** Infer endpoints from visible held-ball, flight and stopped-ball observations. */
+export function estimateAutomaticPitchFlight({
+  detections, videoWidth, videoHeight, distanceMeters, extensionMeters = 1.75,
+}: PitchFlightParams) {
+  const distance = distanceMeters - extensionMeters;
+  if (!(videoWidth > 0 && videoHeight > 0 && distance > 0 && Number.isFinite(distance))) return null;
+  const points = detections.map((d) => ({ x: d.x / videoWidth, y: d.y / videoHeight }));
+  const steps = detections.slice(1).map((d, i) => {
+    const dt = d.timestampMs - detections[i].timestampMs;
+    const x = points[i + 1].x - points[i].x;
+    const y = points[i + 1].y - points[i].y;
+    const valid = dt > 0 && dt <= MAX_PITCH_SAMPLE_GAP_MS &&
+      [detections[i], d].every((sample) => sample.confidence >= 0.22 &&
+        sample.width > 0 && sample.height > 0 && sample.x >= 0 &&
+        sample.x <= videoWidth && sample.y >= 0 && sample.y <= videoHeight);
+    return { x, y, dt, valid, rate: Math.hypot(x, y) / dt };
+  });
+  const stationary = (i: number) => steps[i]?.valid && steps[i].rate < 0.00012;
+
+  for (let start = 1; start + 6 < steps.length; start++) {
+    if (!stationary(start - 1) || !steps[start].valid || stationary(start)) continue;
+    for (let end = start + 5; end + 1 < steps.length; end++) {
+      if (!stationary(end) || !stationary(end + 1)) continue;
+      const first = points[start];
+      const last = points[end];
+      const dx = last.x - first.x;
+      const dy = last.y - first.y;
+      const span = Math.hypot(dx, dy);
+      const flightTimeMs = detections[end].timestampMs - detections[start].timestampMs;
+      const speedKmh = distance * 3600 / flightTimeMs / 0.955;
+      if (span < 0.065 || speedKmh < 35 || speedKmh > 195 ||
+          [first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)) continue;
+
+      const flight = steps.slice(start, end);
+      const rates = flight.map((step) => step.rate).sort((a, b) => a - b);
+      const median = rates[Math.floor(rates.length / 2)];
+      const advances = flight.filter((step) => step.x * dx + step.y * dy > 0).length;
+      if (advances / flight.length < 0.8 || flight.some((step) =>
+        !step.valid || step.rate > median * 4 || (step.x * dx + step.y * dy) / span < -0.012
+      ) || steps[start - 1].rate > median * 0.25 ||
+        Math.max(steps[end].rate, steps[end + 1].rate) > median * 0.25) continue;
+
+      const track = detections.slice(start, end + 1);
+      return { track, flightTimeMs, speedKmh: Number(speedKmh.toFixed(1)), detectionCount: track.length };
+    }
+  }
+  return null;
+}
+
 /**
  * Estimate the release speed from a track that covers both image checkpoints.
  * Image checkpoints and the default extension are approximations. This method

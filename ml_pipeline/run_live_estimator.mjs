@@ -10,6 +10,7 @@ const { outputFiles } = await build({
   write: false,
 });
 const bundledSource = Buffer.from(outputFiles[0].contents).toString('base64');
-const { estimatePitchFlight } = await import('data:text/javascript;base64,' + bundledSource);
+const { estimatePitchFlight, estimateAutomaticPitchFlight } = await import('data:text/javascript;base64,' + bundledSource);
 const input = JSON.parse(readFileSync(0, 'utf8'));
-process.stdout.write(JSON.stringify(estimatePitchFlight(input)));
+const estimate = input.checkpoints ? estimatePitchFlight : estimateAutomaticPitchFlight;
+process.stdout.write(JSON.stringify(estimate(input)));

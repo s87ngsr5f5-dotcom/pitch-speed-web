@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TUNNEL_CONFIGS, estimatePitchFlight } from './smartScoutEngine';
+import { DEFAULT_TUNNEL_CONFIGS, estimateAutomaticPitchFlight, estimatePitchFlight } from './smartScoutEngine';
 
 const cameraAngle = 'behind_pitcher';
 const { releaseBox, strikeZoneBox } = DEFAULT_TUNNEL_CONFIGS[cameraAngle];
@@ -48,5 +48,31 @@ describe('video pitch speed estimate', () => {
   it('does not connect detections across a gap or cap an impossible speed', () => {
     expect(estimate(detections.filter((_, index) => index < 3 || index > 6))).toBeNull();
     expect(estimate(detections.map((d) => ({ ...d, timestampMs: d.timestampMs / 3 })))).toBeNull();
+  });
+});
+
+describe('automatic endpoints', () => {
+  const flight = detections.map((sample) => ({ ...sample, x: sample.x - 180, y: sample.y + 60 }));
+  const held = { ...flight[0], timestampMs: flight[0].timestampMs - 40 };
+  const last = flight[flight.length - 1];
+  const stopped = [40, 80].map((dt) => ({ ...last, timestampMs: last.timestampMs + dt }));
+  const auto = (samples: typeof flight) => estimateAutomaticPitchFlight({
+    detections: samples, videoWidth, videoHeight, cameraAngle, distanceMeters: 18.44,
+  });
+
+  it('estimates an off-center pitch from visible movement transitions', () => {
+    expect(auto([held, ...flight, ...stopped])).toMatchObject({ flightTimeMs: 400, speedKmh: 157.3 });
+  });
+
+  it('does not treat a ball disappearing or a late first detection as catch or release', () => {
+    expect(auto([held, ...flight])).toBeNull();
+    expect(auto([...flight, ...stopped])).toBeNull();
+  });
+
+  it('does not bridge missing frames or accept a ball stopping at the image edge', () => {
+    expect(auto([held, ...flight.filter((_, i) => i < 3 || i > 6), ...stopped])).toBeNull();
+    expect(auto([held, ...flight, ...stopped].map((sample, i, all) => ({
+      ...sample, x: 300 + Math.min(Math.max(i - 1, 0), all.length - 4) * 69,
+    })))).toBeNull();
   });
 });

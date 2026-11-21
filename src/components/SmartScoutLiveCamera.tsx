@@ -116,6 +116,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const checkpoints = uploadedVideoUrl
     ? fileCheckpoints ?? DEFAULT_TUNNEL_CONFIGS[cameraAngle]
     : cameraCheckpoints[cameraAngle];
+  const manualCheckpoints = checkpoints === DEFAULT_TUNNEL_CONFIGS[cameraAngle] ? undefined : checkpoints;
 
   const resetTrack = useCallback(() => {
     if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
@@ -378,7 +379,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       cameraAngle,
       discipline,
       distanceMeters,
-      checkpoints,
+      checkpoints: manualCheckpoints,
       preferredPitchType: selectedPitchType,
       videoUrl: uploadedVideoUrl ?? undefined,
     });
@@ -396,14 +397,14 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
     flushTimerRef.current = window.setTimeout(() => {
       if (activeTrackRef.current.length >= 3) {
-        setCaptureMessage('未取得完整球路。請讓出手和本壘都入鏡。');
+        setCaptureMessage('有偵測到球，但還無法確認出手與接球。可調整測速框後再試。');
       }
       resetTrack();
     }, uploadedVideoUrl ? 500 : 180);
   }, [
     cameraAngle,
     captureVideoSnapshot,
-    checkpoints,
+    manualCheckpoints,
     discipline,
     distanceMeters,
     latestBall,
@@ -616,7 +617,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           setFilePlaying(false);
           setFileEnded(true);
           if (measuredInFileRef.current === 0) {
-            setCaptureMessage('影片沒有取得完整球路。請調整測速框，或選用涵蓋出手和本壘的影片。');
+            setCaptureMessage('影片沒有取得完整球路。若投手和捕手都入鏡，請試用「調整測速框」再重新分析。');
           }
         }}
         onLoadedMetadata={(event) => {
@@ -721,7 +722,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             ? '目前支援投球測速。請在設定中切換為投球。'
             : calibration
               ? calibration.release ? '點選球通過本壘的位置' : '點選投手放球的位置'
-              : '固定鏡頭，讓出手位置與本壘對準測速框。')}
+              : manualCheckpoints
+                ? '使用你設定的出手與本壘位置。'
+                : '自動辨識出手和接球。請固定鏡頭，讓投手、球路與捕手都入鏡。')}
         </p>
         {uploadedVideoUrl && !filePlaying && !calibrating && !workerError && (
           <button
@@ -746,6 +749,30 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             {calibrating ? '取消調整' : '調整測速框'}
           </button>
         )}
+        {manualCheckpoints && !calibrating && (
+          <button
+            type="button"
+            className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
+            onClick={() => {
+              if (uploadedVideoUrl) {
+                setFileCheckpoints(null);
+              } else {
+                setCameraCheckpoints((saved) => ({
+                  ...saved, [cameraAngle]: DEFAULT_TUNNEL_CONFIGS[cameraAngle],
+                }));
+                try {
+                  localStorage.removeItem(`${CHECKPOINTS_KEY}:${cameraAngle}`);
+                } catch {
+                  // Still switch back to automatic mode for the current session.
+                }
+              }
+              setCaptureMessage('');
+              resetTrack();
+            }}
+          >
+            改回自動辨識
+          </button>
+        )}
       </div>
 
       {/* 3D 漸變紅色彗星彩帶軌跡 (#7f1022 -> #ef233c) + 末端立體小白球(含縫線與陰影) */}
@@ -768,7 +795,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         {calibrating && (
           <rect width={stageW} height={stageH} fill="transparent" onClick={applyCalibration} />
         )}
-        {discipline === 'pitching' && [checkpoints.releaseBox, checkpoints.strikeZoneBox].map((box, i) => (
+        {discipline === 'pitching' && (manualCheckpoints || calibrating) && [checkpoints.releaseBox, checkpoints.strikeZoneBox].map((box, i) => (
           <rect
             key={i}
             x={(box.cx - box.width / 2) * stageW}
@@ -792,6 +819,16 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             pointerEvents="none"
           />
         )}
+        {!calibrating && currentPitch?.measurement?.automaticEndpoints && [
+          { x: currentPitch.ribbonPath.startX, y: currentPitch.ribbonPath.startY, label: '推估出手' },
+          { x: currentPitch.ribbonPath.endX, y: currentPitch.ribbonPath.endY, label: '推估接球' },
+        ].map(({ x, y, label }) => (
+          <g key={label} transform={`translate(${x * stageW}, ${y * stageH})`}>
+            <circle r={6} fill="#38bdf8" stroke="white" strokeWidth={2} />
+            <text x={10} y={-5} fontSize={14} fill="white" stroke="#0f172a" strokeWidth={3}
+              paintOrder="stroke">{label}</text>
+          </g>
+        ))}
         {!calibrating && showRibbon && currentPitch && ribbonSamples.length >= 2 && (
           <g filter="url(#liveRibbonShadow)">
             <polygon points={polygonPoints} fill="url(#liveRibbonGrad)" />
