@@ -3,11 +3,20 @@ export interface Point2D {
   y: number;
 }
 
+export type CameraViewMode = 'behind_pitcher' | 'behind_catcher' | 'side_view';
+export type AnalysisDiscipline = 'pitching' | 'hitting';
+
 export interface CalibrationConfig {
   distanceMeters: number;        // 預設 18.44m (投手板至本壘板)
   referenceHeightMeters: number; // 垂直切面參考高度，預設 1.5m
   // 畫面像素點：[0]投手側頂點, [1]本壘側頂點, [2]本壘側底點, [3]投手側底點
   imagePoints: [Point2D, Point2D, Point2D, Point2D];
+}
+
+export interface TunnelBoxConfig {
+  // 遠端框與近端框 (0~1 正規化座標): { cx, cy, width, height }
+  releaseBox: { cx: number; cy: number; width: number; height: number };
+  strikeZoneBox: { cx: number; cy: number; width: number; height: number };
 }
 
 export interface BallDetection {
@@ -19,14 +28,55 @@ export interface BallDetection {
   timestampMs: number;
 }
 
+export interface SmartScoutPitchMetrics {
+  pitchType: string;
+  pitchName: string;
+  pitchShort: string;
+  pitchColor: string;
+  plateSpeedKmh: number;
+  spinRateRpm: number;
+  activeSpinRpm: number;
+  spinEfficiencyPct: number;
+  spinAxisClock: string;
+  spinAxisDeg: number;
+  gyroAngleDeg: number;
+  verticalBreakCm: number;   // IVB (+上竄 / -下墜)
+  horizontalBreakCm: number; // HB (+手臂側 / -手套側)
+  releaseHeightM: number;
+  releaseSideM: number;
+  extensionM: number;
+  plateXCm: number;          // 本壘水平位置 (-45 ~ +45 cm, 0 為紅中)
+  plateYCm: number;          // 本壘垂直高度 (15 ~ 135 cm, 好球帶約 46 ~ 106 cm)
+  zoneId: number;            // 1~9 為九宮格好球帶, 11~14 為外圍追打壞球帶
+  isStrike: boolean;
+  aiScoutComment: string;
+}
+
+export interface SmartScoutHitMetrics {
+  id: number;
+  exitVelocityKmh: number;
+  exitVelocityMph: number;
+  launchAngleDeg: number;
+  sprayAngleDeg: number;     // -45°(左外野線) ~ +45°(右外野線)
+  estimatedDistanceM: number;
+  hitType: '滾地球 (Ground Ball)' | '平飛球 (Line Drive)' | '高飛球 (Fly Ball)' | '沖天炮 (Pop Up)';
+  hitResultTag: string;
+  isHardHit: boolean;
+  isBarrel: boolean;
+  aiHitComment: string;
+}
+
 export interface SpeedResult {
   speedKmh: number;
   speedMph: number;
   flightTimeMs: number;
   confidenceScore: number;
   trajectoryWorld: Point2D[];
+  trajectoryPixel?: Array<{ x: number; y: number; r: number }>;
   label?: string;
   groundTruthKmh?: number;
+  viewMode?: CameraViewMode;
+  smartScout?: SmartScoutPitchMetrics;
 }
 
 export interface BenchmarkPitchItem {
@@ -48,6 +98,7 @@ export interface BenchmarkPitchItem {
   detectedFrames: number;
   flightTimeMs: number;
   detections: BallDetection[];
+  smartScout?: SmartScoutPitchMetrics;
 }
 
 export interface BenchmarkDataset {

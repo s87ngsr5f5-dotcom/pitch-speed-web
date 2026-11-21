@@ -18,8 +18,22 @@ import { CalibrationOverlay } from './components/CalibrationOverlay';
 import { SpeedDashboard } from './components/SpeedDashboard';
 import { LandscapeHudBar } from './components/LandscapeHudBar';
 import { BenchmarkLab } from './components/BenchmarkLab';
+import { SmartScoutPitchPlayer } from './components/SmartScoutPitchPlayer';
+import { SmartScoutSessionView } from './components/SmartScoutSessionView';
+import { SmartScoutTrackWizard } from './components/SmartScoutTrackWizard';
+import { SmartScoutPlayerProfile } from './components/SmartScoutPlayerProfile';
+import {
+  INITIAL_SMARTSCOUT_SESSIONS,
+  SmartScoutPitchRecord,
+  SmartScoutSession,
+  buildRibbonPathFromMetrics,
+  convertBenchmark100ToSession,
+  getPitchTypeColor,
+  speakPitchResult,
+} from './data/smartScoutDefaultSessions';
 
 const CALIBRATION_STORAGE_KEY = 'pitchspeed_calibration_v1';
+const SMARTSCOUT_SESSIONS_KEY = 'smartscout_sessions_v1';
 
 interface StoredCalibrationSettings {
   version: 1;
@@ -43,13 +57,6 @@ const DEFAULT_SETTINGS: StoredCalibrationSettings = {
   airDragComp: false,
   normPoints: DEFAULT_NORM_POINTS,
 };
-
-const DISTANCE_PRESETS = [
-  { label: '職棒/成棒 18.44m', value: 18.44 },
-  { label: '青少棒 16.46m', value: 16.46 },
-  { label: '少棒 14.02m', value: 14.02 },
-  { label: '牛棚短距 10.0m', value: 10.0 },
-];
 
 function clamp01(val: number): number {
   return Math.max(0, Math.min(1, val));
@@ -123,14 +130,48 @@ function loadStoredSettings(): { settings: StoredCalibrationSettings; restored: 
 export function App() {
   const initialLoad = useMemo(() => loadStoredSettings(), []);
 
-  const [mode, setMode] = useState<'camera' | 'video' | 'lab'>('lab');
+  // SmartScout 5 大底部主分頁：追蹤 | 場次 | 影片 | 球員 | 設定
+  const [navTab, setNavTab] = useState<'track' | 'sessions' | 'video' | 'player' | 'settings'>(
+    'video'
+  );
+  const [sessions, setSessions] = useState<SmartScoutSession[]>(() => {
+    try {
+      const saved = window.localStorage.getItem(SMARTSCOUT_SESSIONS_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as SmartScoutSession[];
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return INITIAL_SMARTSCOUT_SESSIONS;
+  });
+
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    INITIAL_SMARTSCOUT_SESSIONS[0].id
+  );
+  const [activePlayerPitch, setActivePlayerPitch] = useState<{
+    sessionId: string;
+    pitchId: string;
+  }>({
+    sessionId: INITIAL_SMARTSCOUT_SESSIONS[0].id,
+    pitchId: INITIAL_SMARTSCOUT_SESSIONS[0].pitches[0].id,
+  });
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
+  const [defaultCameraAngle, setDefaultCameraAngle] = useState<
+    'behind_pitcher' | 'behind_catcher'
+  >('behind_pitcher');
+  const [defaultDiscipline, setDefaultDiscipline] = useState<'pitching' | 'hitting'>('pitching');
+
+  // 即時鏡頭 / 慢動作影片 / 100球實驗室舞台狀態
+  const [mode, setMode] = useState<'camera' | 'video' | 'lab'>('camera');
   const [slowMoScale, setSlowMoScale] = useState<number>(1);
   const [locked, setLocked] = useState<boolean>(false);
   const [hudMode, setHudMode] = useState<boolean>(false);
 
   const [videoSize, setVideoSize] = useState({ width: 1280, height: 720 });
   const [settings, setSettings] = useState<StoredCalibrationSettings>(initialLoad.settings);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'restored' | 'saved' | 'error'>(
+  const [, setSaveStatus] = useState<'idle' | 'restored' | 'saved' | 'error'>(
     initialLoad.restored ? 'restored' : 'idle'
   );
 
@@ -146,7 +187,6 @@ export function App() {
   const [latestResult, setLatestResult] = useState<SpeedResult | null>(null);
   const [history, setHistory] = useState<SpeedResult[]>([]);
 
-  // 100 球模型練習庫狀態
   const [activePitchId, setActivePitchId] = useState<number | null>(null);
   const [activeSimLabel, setActiveSimLabel] = useState<string | null>(null);
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
@@ -163,7 +203,9 @@ export function App() {
   const isFirstRenderRef = useRef<boolean>(true);
   const simTimerRef = useRef<number | null>(null);
 
-  const { isLandscape, wakeLockActive } = useIosPwa(mode === 'camera' || hudMode);
+  const { isLandscape, wakeLockActive } = useIosPwa(
+    (navTab === 'settings' && mode === 'camera') || hudMode
+  );
 
   const modelUrl = useMemo(
     () => new URL('./models/ball_yolo11n.onnx', window.location.href).href,
@@ -176,6 +218,32 @@ export function App() {
     isUpdatingModel,
     forceUpdateModel,
   } = useModelCache(modelUrl, workerStatus);
+
+  // 載入 100 部投球模型實測庫並加入 SmartScout 場次清單
+  useEffect(() => {
+    const url = new URL('./data/benchmark_100.json', window.location.href).href;
+    fetch(url)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: BenchmarkDataset | null) => {
+        if (!data?.pitches?.length) return;
+        const benchSession = convertBenchmark100ToSession(data);
+        setSessions((prev) => {
+          if (prev.some((s) => s.id === benchSession.id)) return prev;
+          return [...prev, benchSession];
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  // 自動儲存使用者場次紀錄
+  useEffect(() => {
+    try {
+      const toStore = sessions.filter((s) => s.id !== 'session-benchmark-100');
+      window.localStorage.setItem(SMARTSCOUT_SESSIONS_KEY, JSON.stringify(toStore));
+    } catch {
+      // ignore
+    }
+  }, [sessions]);
 
   const calibration = useMemo<CalibrationConfig>(
     () => ({
@@ -223,21 +291,94 @@ export function App() {
     }
   }, [calibration, settings.airDragComp]);
 
-  const recordResult = useCallback((res: SpeedResult | null) => {
-    if (!res || res.confidenceScore < 0.55) return;
-    setLatestResult(res);
-    const sig = `${res.trajectoryWorld[0]?.x}-${res.trajectoryWorld.length}-${res.speedKmh}`;
-    if (res.trajectoryWorld.length >= 4 && lastSigRef.current !== sig) {
-      lastSigRef.current = sig;
-      setHistory((prev) =>
-        prev[0] &&
-        !res.label &&
-        Math.abs(prev[0].flightTimeMs - res.flightTimeMs) < 35
-          ? [res, ...prev.slice(1)]
-          : [res, ...prev].slice(0, 50)
-      );
-    }
-  }, []);
+  const handleSaveTrackedPitch = useCallback(
+    (
+      newPitchData: Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'>,
+      discipline: 'pitching' | 'hitting',
+      cameraAngle: 'behind_pitcher' | 'behind_catcher'
+    ) => {
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const dateStr = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())}`;
+      const timeStr = `${dateStr} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      const pitchId = `p-${Date.now()}`;
+
+      let targetSessId = selectedSessionId ?? sessions[0]?.id ?? 'session-today';
+      let createdPitch: SmartScoutPitchRecord | null = null;
+
+      setSessions((prev) => {
+        const targetIdx = prev.findIndex(
+          (s) => s.id === targetSessId && s.id !== 'session-benchmark-100'
+        );
+        if (targetIdx >= 0) {
+          const sess = prev[targetIdx];
+          const nextNum =
+            sess.pitches.reduce((m, p) => Math.max(m, p.pitchNumber), 0) + 1;
+          const record: SmartScoutPitchRecord = {
+            ...newPitchData,
+            id: pitchId,
+            pitchNumber: nextNum,
+            timestamp: timeStr,
+          };
+          createdPitch = record;
+          const updated = [...prev];
+          updated[targetIdx] = {
+            ...sess,
+            pitches: [...sess.pitches, record],
+          };
+          return updated;
+        } else {
+          targetSessId = `session-${Date.now()}`;
+          const record: SmartScoutPitchRecord = {
+            ...newPitchData,
+            id: pitchId,
+            pitchNumber: 1,
+            timestamp: timeStr,
+          };
+          createdPitch = record;
+          const newSess: SmartScoutSession = {
+            id: targetSessId,
+            title: `${dateStr} ${discipline === 'hitting' ? '打擊' : '投球'}`,
+            date: dateStr,
+            monthGroup: `${now.getFullYear()}年${now.getMonth() + 1}月`,
+            discipline,
+            cameraSetup: cameraAngle,
+            pitches: [record],
+          };
+          return [newSess, ...prev];
+        }
+      });
+
+      window.setTimeout(() => {
+        if (createdPitch) {
+          speakPitchResult(createdPitch, voiceEnabled);
+        }
+        setSelectedSessionId(targetSessId);
+        setActivePlayerPitch({ sessionId: targetSessId, pitchId });
+        setNavTab('video');
+      }, 60);
+    },
+    [selectedSessionId, sessions, voiceEnabled]
+  );
+
+  const recordResult = useCallback(
+    (res: SpeedResult | null) => {
+      if (!res || res.confidenceScore < 0.55) return;
+      setLatestResult(res);
+      const sig = `${res.trajectoryWorld[0]?.x}-${res.trajectoryWorld.length}-${res.speedKmh}`;
+      if (res.trajectoryWorld.length >= 4 && lastSigRef.current !== sig) {
+        lastSigRef.current = sig;
+        setHistory((prev) =>
+          prev[0] &&
+          !res.label &&
+          Math.abs(prev[0].flightTimeMs - res.flightTimeMs) < 35
+            ? [res, ...prev.slice(1)]
+            : [res, ...prev].slice(0, 50)
+        );
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     const worker = new Worker(new URL('./workers/inference.worker.ts', import.meta.url), {
@@ -329,18 +470,38 @@ export function App() {
 
   const handleTrackEnd = useCallback(() => {
     const finalRes = estimatorRef.current?.flush() ?? null;
-    if (finalRes) recordResult(finalRes);
+    if (finalRes) {
+      recordResult(finalRes);
+      // 將實測到的球自動寫入當前 SmartScout 場次並產生紅色彩帶軌跡
+      const vb = Number((45 + (finalRes.speedKmh - 100) * 0.3).toFixed(1));
+      const hb = Number((18 + (finalRes.speedKmh % 12)).toFixed(1));
+      const eff = 82;
+      const totalSpin = Math.round(1850 + finalRes.speedKmh * 3.2);
+      const activeSpin = Math.round(totalSpin * (eff / 100));
+      handleSaveTrackedPitch(
+        {
+          pitchType: '四縫線快速球',
+          pitchColor: getPitchTypeColor('四縫線快速球'),
+          cameraAngle: defaultCameraAngle,
+          speedKmh: finalRes.speedKmh,
+          verticalBreakCm: vb,
+          horizontalBreakCm: hb,
+          efficiencyPct: eff,
+          spinDirection: '00:52',
+          gyroDegree: 35,
+          activeSpinRpm: activeSpin,
+          totalSpinRpm: totalSpin,
+          plateXCm: 4.5,
+          plateYCm: 78.0,
+          ribbonPath: buildRibbonPathFromMetrics(defaultCameraAngle, vb, hb, 4.5, 78.0),
+        },
+        defaultDiscipline,
+        defaultCameraAngle
+      );
+    }
     setLatestBall(null);
-  }, [recordResult]);
+  }, [recordResult, handleSaveTrackedPitch, defaultCameraAngle, defaultDiscipline]);
 
-  const handleResetPoints = useCallback(() => {
-    setSettings((prev) => ({
-      ...prev,
-      normPoints: DEFAULT_NORM_POINTS,
-    }));
-  }, []);
-
-  // 播放單一基準投球軌跡（透過前端真實 SpeedEstimator + Homography 逐幀推算）
   const handlePlayBenchmarkPitch = useCallback(
     (pitch: BenchmarkPitchItem) => {
       if (simTimerRef.current !== null) {
@@ -391,12 +552,11 @@ export function App() {
         if (idx >= dets.length) {
           const finalRes = simEst.flush();
           if (finalRes) {
-            const enriched: SpeedResult = {
+            recordResult({
               ...finalRes,
               label,
               groundTruthKmh: pitch.groundTruthKmh,
-            };
-            recordResult(enriched);
+            });
           }
           setIsSimulating(false);
           simTimerRef.current = null;
@@ -423,7 +583,6 @@ export function App() {
     [recordResult]
   );
 
-  // 一鍵連續跑完 100 球前端物理引擎驗證
   const handleRunBatch100 = useCallback((pitches: BenchmarkPitchItem[]) => {
     if (simTimerRef.current !== null) {
       window.clearTimeout(simTimerRef.current);
@@ -507,293 +666,434 @@ export function App() {
     runChunk();
   }, []);
 
-  // 快速從任何模式觸發隨機一球示範
-  const handleQuickSimulateFromAnyMode = useCallback(() => {
-    const url = new URL('./data/benchmark_100.json', window.location.href).href;
-    fetch(url)
-      .then((r) => r.json())
-      .then((data: BenchmarkDataset) => {
-        if (data.pitches?.length > 0) {
-          const pick = data.pitches[Math.floor(Math.random() * data.pitches.length)];
-          handlePlayBenchmarkPitch(pick);
-        }
-      })
-      .catch(() => {});
-  }, [handlePlayBenchmarkPitch]);
+  // 取得目前正在「影片」分頁播放的場次與投球紀錄
+  const currentVideoSession =
+    sessions.find((s) => s.id === activePlayerPitch.sessionId) ?? sessions[0];
+  const currentVideoPitchIdx = Math.max(
+    0,
+    currentVideoSession.pitches.findIndex((p) => p.id === activePlayerPitch.pitchId)
+  );
+  const currentVideoPitch =
+    currentVideoSession.pitches[currentVideoPitchIdx] ?? currentVideoSession.pitches[0];
 
-  // 初次進入頁面時自動載入第 1 球預覽軌跡，讓畫面一打開就有直觀球道與數據
-  useEffect(() => {
-    const url = new URL('./data/benchmark_100.json', window.location.href).href;
-    fetch(url)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: BenchmarkDataset | null) => {
-        if (data?.pitches?.length) {
-          handlePlayBenchmarkPitch(data.pitches[0]);
-        }
-      })
-      .catch(() => {});
-  }, [handlePlayBenchmarkPitch]);
+  const handleDeletePitch = useCallback((sessionId: string, pitchId: string) => {
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === sessionId
+          ? { ...s, pitches: s.pitches.filter((p) => p.id !== pitchId) }
+          : s
+      )
+    );
+  }, []);
+
+  const handleChangePitchType = useCallback(
+    (sessionId: string, pitchId: string, newType: string) => {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === sessionId
+            ? {
+                ...s,
+                pitches: s.pitches.map((p) =>
+                  p.id === pitchId
+                    ? { ...p, pitchType: newType, pitchColor: getPitchTypeColor(newType) }
+                    : p
+                ),
+              }
+            : s
+        )
+      );
+    },
+    []
+  );
+
+  const handleCreateNewSession = useCallback(() => {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const dateStr = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())}`;
+    const newId = `session-${Date.now()}`;
+    const samplePitch: SmartScoutPitchRecord = {
+      id: `p-${Date.now()}`,
+      pitchNumber: 1,
+      timestamp: `${dateStr} ${pad(now.getHours())}:${pad(now.getMinutes())}:00`,
+      pitchType: '四縫線快速球',
+      pitchColor: '#be1e3c',
+      cameraAngle: defaultCameraAngle,
+      speedKmh: 108.5,
+      verticalBreakCm: 54.2,
+      horizontalBreakCm: 28.4,
+      efficiencyPct: 83,
+      spinDirection: '00:52',
+      gyroDegree: 34,
+      activeSpinRpm: 1760,
+      totalSpinRpm: 2120,
+      plateXCm: 6.0,
+      plateYCm: 80.0,
+      ribbonPath: buildRibbonPathFromMetrics(defaultCameraAngle, 54.2, 28.4, 6.0, 80.0),
+    };
+    const newSess: SmartScoutSession = {
+      id: newId,
+      title: `${dateStr} 牛棚投球`,
+      date: dateStr,
+      monthGroup: `${now.getFullYear()}年${now.getMonth() + 1}月`,
+      discipline: 'pitching',
+      cameraSetup: defaultCameraAngle,
+      pitches: [samplePitch],
+    };
+    setSessions((prev) => [newSess, ...prev]);
+    setSelectedSessionId(newId);
+    setNavTab('sessions');
+  }, [defaultCameraAngle]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 safe-p md:p-6">
-      <div className="mx-auto max-w-5xl space-y-4">
-        <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900/90 p-3.5 border border-slate-800/90 shadow-lg">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/20 text-sm border border-emerald-500/40">
-                ⚾
-              </span>
-              <h1 className="text-xl font-black tracking-tight text-white">
-                PitchSpeed Web <span className="text-emerald-400">18.44m</span>
-              </h1>
-              <span className="rounded-full bg-emerald-950/90 px-2.5 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-700/60">
-                100 球驗證 MAE 0.40 km/h
-              </span>
-              {saveStatus === 'saved' && (
-                <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-300 border border-slate-700">
-                  校正已自動記憶
-                </span>
-              )}
-              {saveStatus === 'restored' && (
-                <span className="rounded-full bg-sky-950/80 px-2 py-0.5 text-[10px] font-semibold text-sky-300 border border-sky-700/60">
-                  已載入上次球場校正
-                </span>
-              )}
-            </div>
-            <p className="mt-1 text-xs text-slate-400">
-              垂直飛行切面 Homography + 重力補償拋物線測速・支援 iOS Safari 後置鏡頭、120/240fps 慢動作與離線 PWA
-            </p>
-          </div>
-
-          <div className="flex flex-wrap rounded-xl bg-slate-950 p-1 border border-slate-800">
-            {(
-              [
-                { id: 'camera', label: '📷 即時後置鏡頭' },
-                { id: 'video', label: '🎬 上傳慢動作影片' },
-                { id: 'lab', label: '⚾ 100 球模型練習庫' },
-              ] as const
-            ).map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                onClick={() => {
-                  setMode(m.id);
-                  if (m.id !== 'lab') {
-                    setActiveSimLabel(null);
-                    estimatorRef.current?.reset();
-                  }
-                }}
-                className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
-                  mode === m.id
-                    ? 'bg-emerald-600 text-white shadow'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-        </header>
-
-        <section className="flex flex-wrap items-center gap-3 rounded-2xl bg-slate-900/95 p-3 border border-slate-800 text-xs shadow-md">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-slate-400">場地快速切換：</span>
-            {DISTANCE_PRESETS.map((preset) => (
-              <button
-                key={preset.value}
-                type="button"
-                onClick={() =>
-                  setSettings((p) => ({
-                    ...p,
-                    distanceMeters: preset.value,
-                  }))
-                }
-                className={`rounded-lg px-2 py-1 text-[11px] font-bold transition ${
-                  Math.abs(settings.distanceMeters - preset.value) < 0.02
-                    ? 'bg-emerald-600/90 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                {preset.label}
-              </button>
-            ))}
-          </div>
-
-          <label className="flex items-center gap-1.5">
-            <span className="text-slate-400">距離(m)</span>
-            <input
-              type="number"
-              step="0.01"
-              min="2"
-              max="50"
-              value={settings.distanceMeters}
-              onChange={(e) =>
-                setSettings((p) => ({
-                  ...p,
-                  distanceMeters: Math.max(1, Number(e.target.value) || 18.44),
-                }))
-              }
-              className="w-18 rounded-lg bg-slate-800 px-2 py-1 font-mono text-white border border-slate-700"
-            />
-          </label>
-
-          <label className="flex items-center gap-1.5">
-            <span className="text-slate-400">切面高度(m)</span>
-            <input
-              type="number"
-              step="0.1"
-              min="0.5"
-              max="5"
-              value={settings.referenceHeightMeters}
-              onChange={(e) =>
-                setSettings((p) => ({
-                  ...p,
-                  referenceHeightMeters: Math.max(0.3, Number(e.target.value) || 1.5),
-                }))
-              }
-              className="w-14 rounded-lg bg-slate-800 px-2 py-1 font-mono text-white border border-slate-700"
-            />
-          </label>
-
-          {mode === 'video' && (
-            <label className="flex items-center gap-1.5">
-              <span className="text-slate-400">慢動作倍率</span>
-              <select
-                value={slowMoScale}
-                onChange={(e) => setSlowMoScale(Number(e.target.value))}
-                className="rounded-lg bg-slate-800 px-2 py-1 text-white border border-slate-700"
-              >
-                <option value={1}>1x 一般影片 (30/60fps)</option>
-                <option value={4}>1/4x 慢動作 (iPhone 120fps)</option>
-                <option value={8}>1/8x 慢動作 (iPhone 240fps)</option>
-              </select>
-            </label>
-          )}
-
-          <label className="flex items-center gap-1.5 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={settings.airDragComp}
-              onChange={(e) =>
-                setSettings((p) => ({ ...p, airDragComp: e.target.checked }))
-              }
-              className="accent-emerald-500"
-            />
-            <span className="text-slate-300">空氣阻力初速補償 (+6%)</span>
-          </label>
-
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={handleResetPoints}
-              className="rounded-lg bg-slate-800 px-3 py-1.5 font-semibold text-slate-300 hover:bg-slate-700"
-            >
-              重置四點
-            </button>
-            <button
-              type="button"
-              onClick={() => setHudMode(true)}
-              className="rounded-lg bg-sky-600 px-3 py-1.5 font-bold text-white hover:bg-sky-500"
-            >
-              全螢幕 HUD
-            </button>
-            <button
-              type="button"
-              onClick={() => setLocked((v) => !v)}
-              className={`rounded-lg px-3 py-1.5 font-bold transition ${
-                locked
-                  ? 'bg-amber-500 text-slate-950'
-                  : 'bg-emerald-600 text-white hover:bg-emerald-500'
-              }`}
-            >
-              {locked ? '已鎖定校正框' : '鎖定開始測速'}
-            </button>
-          </div>
-        </section>
-
-        {calError && (
-          <div className="rounded-xl bg-rose-950/70 px-4 py-2 text-xs text-rose-300 border border-rose-800">
-            校正警示：{calError}
-          </div>
-        )}
-
-        <div
-          className={
-            hudMode
-              ? 'fixed inset-0 z-30 flex items-center justify-center bg-black h-[100dvh] w-[100dvw]'
-              : ''
-          }
-        >
-          {hudMode && !isLandscape && (
-            <div className="pointer-events-none absolute top-16 z-50 rounded-full bg-amber-500/95 px-4 py-1.5 text-xs font-bold text-slate-950 shadow-lg">
-              建議將 iPhone 橫持以獲得完整 18.44m 測速視野
-            </div>
-          )}
-
-          <div className={hudMode ? 'h-full w-full' : 'w-full'}>
-            <CameraStream
-              mode={mode}
-              slowMoScale={slowMoScale}
-              isWorkerReady={workerStatus === 'ready'}
-              isBusyRef={isBusyRef}
-              fullHeight={hudMode}
-              onFrame={handleFrame}
-              onVideoSizeChange={handleVideoSizeChange}
-              onTrackEnd={handleTrackEnd}
-              onQuickSimulatePitch={handleQuickSimulateFromAnyMode}
-            >
-              <CalibrationOverlay
-                videoWidth={videoSize.width}
-                videoHeight={videoSize.height}
-                config={calibration}
-                onChange={handleCalibrationChange}
-                locked={locked}
-                homography={homography}
-                latestBall={latestBall}
-                latestResult={latestResult}
-                activeSimLabel={activeSimLabel}
-              />
-            </CameraStream>
-          </div>
-
-          {hudMode && (
-            <LandscapeHudBar
-              latestResult={latestResult}
-              inferTimeMs={inferTimeMs}
-              locked={locked}
-              wakeLockActive={wakeLockActive}
-              onToggleLock={() => setLocked((v) => !v)}
-              onExitHud={() => setHudMode(false)}
-            />
-          )}
-        </div>
-
-        <SpeedDashboard
-          latestResult={latestResult}
-          history={history}
-          inferTimeMs={inferTimeMs}
-          workerStatus={workerStatus}
-          backend={backend}
-          workerError={workerError}
-          isModelCached={isModelCached}
-          cachedSizeMb={cachedSizeMb}
-          isOnline={isOnline}
-          isUpdatingModel={isUpdatingModel}
-          onForceUpdateModel={forceUpdateModel}
-          onClearHistory={() => setHistory([])}
-          onSelectHistoryItem={(item) => setLatestResult(item)}
-        />
-
-        {mode === 'lab' && (
-          <BenchmarkLab
-            activePitchId={activePitchId}
-            isSimulating={isSimulating}
-            batchProgress={batchProgress}
-            onPlayPitch={handlePlayBenchmarkPitch}
-            onRunBatchAll={handleRunBatch100}
+    <div className="min-h-screen bg-slate-950 text-slate-100 pb-20">
+      {/* 內容主視窗 */}
+      <main className="mx-auto max-w-5xl px-2 pt-2 sm:px-4 sm:pt-4">
+        {/* 分頁 1：追蹤 (您要錄製什麼？ -> 投球 / 打擊 / 語音朗讀結果) */}
+        {navTab === 'track' && (
+          <SmartScoutTrackWizard
+            voiceEnabled={voiceEnabled}
+            onToggleVoice={setVoiceEnabled}
+            defaultDiscipline={defaultDiscipline}
+            defaultCameraAngle={defaultCameraAngle}
+            onSaveTrackedPitch={handleSaveTrackedPitch}
+            onEnterLiveCameraStage={(disc, camAngle) => {
+              setDefaultDiscipline(disc);
+              setDefaultCameraAngle(camAngle);
+              setMode('camera');
+              setNavTab('settings');
+            }}
           />
         )}
-      </div>
+
+        {/* 分頁 2：場次 (場次總覽 + 2026/08/26 投球：列表 / 圖表 / AI 教練 / 比較結果) */}
+        {navTab === 'sessions' && (
+          <SmartScoutSessionView
+            sessions={sessions}
+            selectedSessionId={selectedSessionId}
+            onSelectSession={setSelectedSessionId}
+            onOpenPitchPlayer={(sessionId, pitchId) => {
+              setActivePlayerPitch({ sessionId, pitchId });
+              setNavTab('video');
+            }}
+            onDeletePitch={handleDeletePitch}
+            onChangePitchType={handleChangePitchType}
+            onStartNewRecording={(sessionId) => {
+              if (sessionId) setSelectedSessionId(sessionId);
+              setNavTab('track');
+            }}
+            onCreateNewSession={handleCreateNewSession}
+          />
+        )}
+
+        {/* 分頁 3：影片 (SmartScout 經典「投球 #1」3D 紅色彩帶軌跡播放器) */}
+        {navTab === 'video' && currentVideoPitch && (
+          <SmartScoutPitchPlayer
+            pitch={currentVideoPitch}
+            totalInSession={currentVideoSession.pitches.length}
+            onBack={() => {
+              setSelectedSessionId(currentVideoSession.id);
+              setNavTab('sessions');
+            }}
+            onDelete={(pitchId) =>
+              handleDeletePitch(currentVideoSession.id, pitchId)
+            }
+            onChangePitchType={(pitchId, newType) =>
+              handleChangePitchType(currentVideoSession.id, pitchId, newType)
+            }
+            onPrevPitch={
+              currentVideoPitchIdx > 0
+                ? () =>
+                    setActivePlayerPitch({
+                      sessionId: currentVideoSession.id,
+                      pitchId: currentVideoSession.pitches[currentVideoPitchIdx - 1].id,
+                    })
+                : undefined
+            }
+            onNextPitch={
+              currentVideoPitchIdx < currentVideoSession.pitches.length - 1
+                ? () =>
+                    setActivePlayerPitch({
+                      sessionId: currentVideoSession.id,
+                      pitchId: currentVideoSession.pitches[currentVideoPitchIdx + 1].id,
+                    })
+                : undefined
+            }
+          />
+        )}
+
+        {/* 分頁 4：球員 (個人資料、活躍熱力圖、1/3/12個月數據成長) */}
+        {navTab === 'player' && <SmartScoutPlayerProfile sessions={sessions} />}
+
+        {/* 分頁 5：設定 & AI 即時鏡頭 / 100球模型實驗室 */}
+        {navTab === 'settings' && (
+          <div className="space-y-4 pb-10">
+            <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 p-3.5 border border-slate-800">
+              <div>
+                <h1 className="text-lg font-black text-white">
+                  SmartScout × PitchSpeed AI 引擎設定與 100 球實驗室
+                </h1>
+                <p className="text-xs text-slate-400">
+                  支援投手正後方 / 捕手正前方 / 18.44m 側面 Homography 即時鏡頭與 100 部投球模型驗證
+                </p>
+              </div>
+
+              <div className="flex flex-wrap rounded-xl bg-slate-950 p-1 border border-slate-800">
+                {(
+                  [
+                    { id: 'camera', label: '📷 即時鏡頭' },
+                    { id: 'video', label: '🎬 慢動作影片' },
+                    { id: 'lab', label: '⚾ 100 球模型實驗室' },
+                  ] as const
+                ).map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setMode(m.id)}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+                      mode === m.id
+                        ? 'bg-[#0b72b9] text-white'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            </header>
+
+            <section className="flex flex-wrap items-center gap-3 rounded-2xl bg-slate-900 p-3 border border-slate-800 text-xs">
+              <label className="flex items-center gap-1.5">
+                <span className="text-slate-400">鏡頭視角</span>
+                <select
+                  value={defaultCameraAngle}
+                  onChange={(e) =>
+                    setDefaultCameraAngle(
+                      e.target.value as 'behind_pitcher' | 'behind_catcher'
+                    )
+                  }
+                  className="rounded-lg bg-slate-800 px-2.5 py-1 font-bold text-white border border-slate-700"
+                >
+                  <option value="behind_pitcher">投手正後方 (Behind Pitcher)</option>
+                  <option value="behind_catcher">投手正前方 / 捕手後 (Behind Catcher)</option>
+                </select>
+              </label>
+
+              <label className="flex items-center gap-1.5">
+                <span className="text-slate-400">距離(m)</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="2"
+                  max="50"
+                  value={settings.distanceMeters}
+                  onChange={(e) =>
+                    setSettings((p) => ({
+                      ...p,
+                      distanceMeters: Math.max(1, Number(e.target.value) || 18.44),
+                    }))
+                  }
+                  className="w-18 rounded-lg bg-slate-800 px-2 py-1 font-mono text-white border border-slate-700"
+                />
+              </label>
+
+              {mode === 'video' && (
+                <label className="flex items-center gap-1.5">
+                  <span className="text-slate-400">慢動作倍率</span>
+                  <select
+                    value={slowMoScale}
+                    onChange={(e) => setSlowMoScale(Number(e.target.value))}
+                    className="rounded-lg bg-slate-800 px-2 py-1 text-white border border-slate-700"
+                  >
+                    <option value={1}>1x 一般影片 (30/60fps)</option>
+                    <option value={4}>1/4x 慢動作 (iPhone 120fps)</option>
+                    <option value={8}>1/8x 慢動作 (iPhone 240fps)</option>
+                  </select>
+                </label>
+              )}
+
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setHudMode(true)}
+                  className="rounded-lg bg-sky-600 px-3 py-1.5 font-bold text-white hover:bg-sky-500"
+                >
+                  全螢幕 HUD
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLocked((v) => !v)}
+                  className={`rounded-lg px-3 py-1.5 font-bold transition ${
+                    locked
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'bg-emerald-600 text-white hover:bg-emerald-500'
+                  }`}
+                >
+                  {locked ? '已鎖定校正框' : '鎖定開始測速'}
+                </button>
+              </div>
+            </section>
+
+            {calError && (
+              <div className="rounded-xl bg-rose-950/70 px-4 py-2 text-xs text-rose-300 border border-rose-800">
+                校正警示：{calError}
+              </div>
+            )}
+
+            <div
+              className={
+                hudMode
+                  ? 'fixed inset-0 z-30 flex items-center justify-center bg-black h-[100dvh] w-[100dvw]'
+                  : ''
+              }
+            >
+              {hudMode && !isLandscape && (
+                <div className="pointer-events-none absolute top-16 z-50 rounded-full bg-amber-500/95 px-4 py-1.5 text-xs font-bold text-slate-950 shadow-lg">
+                  建議將 iPhone 橫持以獲得完整視野
+                </div>
+              )}
+
+              <div className={hudMode ? 'h-full w-full' : 'w-full'}>
+                <CameraStream
+                  mode={mode}
+                  slowMoScale={slowMoScale}
+                  isWorkerReady={workerStatus === 'ready'}
+                  isBusyRef={isBusyRef}
+                  fullHeight={hudMode}
+                  onFrame={handleFrame}
+                  onVideoSizeChange={handleVideoSizeChange}
+                  onTrackEnd={handleTrackEnd}
+                >
+                  <CalibrationOverlay
+                    videoWidth={videoSize.width}
+                    videoHeight={videoSize.height}
+                    config={calibration}
+                    onChange={handleCalibrationChange}
+                    locked={locked}
+                    homography={homography}
+                    latestBall={latestBall}
+                    latestResult={latestResult}
+                    activeSimLabel={activeSimLabel}
+                  />
+                </CameraStream>
+              </div>
+
+              {hudMode && (
+                <LandscapeHudBar
+                  latestResult={latestResult}
+                  inferTimeMs={inferTimeMs}
+                  locked={locked}
+                  wakeLockActive={wakeLockActive}
+                  onToggleLock={() => setLocked((v) => !v)}
+                  onExitHud={() => setHudMode(false)}
+                />
+              )}
+            </div>
+
+            <SpeedDashboard
+              latestResult={latestResult}
+              history={history}
+              inferTimeMs={inferTimeMs}
+              workerStatus={workerStatus}
+              backend={backend}
+              workerError={workerError}
+              isModelCached={isModelCached}
+              cachedSizeMb={cachedSizeMb}
+              isOnline={isOnline}
+              isUpdatingModel={isUpdatingModel}
+              onForceUpdateModel={forceUpdateModel}
+              onClearHistory={() => setHistory([])}
+              onSelectHistoryItem={(item) => setLatestResult(item)}
+            />
+
+            <BenchmarkLab
+              activePitchId={activePitchId}
+              isSimulating={isSimulating}
+              batchProgress={batchProgress}
+              onPlayPitch={handlePlayBenchmarkPitch}
+              onRunBatchAll={handleRunBatch100}
+            />
+          </div>
+        )}
+      </main>
+
+      {/* SmartScout 經典底部 5 大導覽列：追蹤 | 場次 | 影片 | 球員 | 設定 */}
+      <nav className="fixed bottom-0 inset-x-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur-md text-slate-500 shadow-[0_-4px_20px_rgba(0,0,0,0.12)]">
+        <div className="mx-auto grid max-w-md grid-cols-5 py-1.5 text-center text-[11px] font-bold">
+          <button
+            type="button"
+            onClick={() => setNavTab('track')}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 transition ${
+              navTab === 'track' ? 'text-[#0b72b9]' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M23 7l-7 5 7 5V7z" />
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+            </svg>
+            <span>追蹤</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setNavTab('sessions')}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 transition ${
+              navTab === 'sessions' ? 'text-[#0b72b9]' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="8" y1="6" x2="21" y2="6" />
+              <line x1="8" y1="12" x2="21" y2="12" />
+              <line x1="8" y1="18" x2="21" y2="18" />
+              <line x1="3" y1="6" x2="3.01" y2="6" />
+              <line x1="3" y1="12" x2="3.01" y2="12" />
+              <line x1="3" y1="18" x2="3.01" y2="18" />
+            </svg>
+            <span>場次</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setNavTab('video')}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 transition ${
+              navTab === 'video' ? 'text-[#0b72b9]' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <polygon points="10 8 16 12 10 16 10 8" />
+            </svg>
+            <span>影片</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setNavTab('player')}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 transition ${
+              navTab === 'player' ? 'text-[#0b72b9]' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+            <span>球員</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setNavTab('settings')}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 transition ${
+              navTab === 'settings' ? 'text-[#0b72b9]' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+            <span>設定</span>
+          </button>
+        </div>
+      </nav>
     </div>
   );
 }

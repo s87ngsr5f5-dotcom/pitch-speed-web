@@ -1,5 +1,5 @@
 // 版本號：更新前端 UI 時改 APP_CACHE；重新訓練替換 .onnx 模型時改 AI_CACHE
-const APP_CACHE = 'pitchspeed-app-v2';
+const APP_CACHE = 'pitchspeed-app-v3';
 const AI_CACHE = 'pitchspeed-ai-v1';
 const VALID_CACHES = [APP_CACHE, AI_CACHE];
 
