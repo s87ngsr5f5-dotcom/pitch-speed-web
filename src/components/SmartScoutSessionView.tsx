@@ -822,23 +822,18 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
         </div>
       )}
 
-      {/* 子分頁 3：AI 教練 (完全免費解鎖無馬賽克！含球種特徵 + 優勢 3 / 重點改善 3) */}
+      {/* 子分頁 3：AI 教練 (簡潔清晰淺色卡片，無冗長文字) */}
       {activeSubTab === 'ai_coach' && (
         <div className="space-y-4">
-          <div className="text-center py-2">
-            <h3 className="text-2xl font-black text-white">已分析您的投球</h3>
-            <p className="mt-1 text-xs text-emerald-400 font-semibold">
-              🔓 AI 教練專業版已完整解鎖（免訂閱、無次數限制）
-            </p>
+          <div className="text-center py-1">
+            <h3 className="text-xl font-black text-slate-900">已分析您的投球</h3>
           </div>
 
           {/* 卡片 1：球種特徵 */}
-          <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-md border border-slate-200 space-y-3">
+          <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-3">
             <div className="flex items-center justify-between">
               <h4 className="text-base font-extrabold text-slate-900">球種特徵</h4>
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800">
-                🔓 已解鎖完整數據
-              </span>
+              <span className="text-xs font-bold text-[#0b72b9]">🔓</span>
             </div>
 
             <div className="overflow-x-auto rounded-2xl border border-slate-200">
@@ -848,8 +843,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                     <th className="py-2.5 px-3">球種</th>
                     <th className="py-2.5 px-2 text-right">球速 [km/h]</th>
                     <th className="py-2.5 px-2 text-right">垂直變化量 [cm]</th>
-                    <th className="py-2.5 px-2 text-right">水平變化量 [cm]</th>
-                    <th className="py-2.5 px-3 text-right">平均轉速 / 效率</th>
+                    <th className="py-2.5 px-3 text-right">水平變化量 [cm]</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 font-semibold">
@@ -860,16 +854,11 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                           className="inline-block h-2.5 w-2.5 rounded-full"
                           style={{ backgroundColor: s.color }}
                         />
-                        <span>
-                          {s.name} ({s.count}球)
-                        </span>
+                        <span>{s.name}</span>
                       </td>
                       <td className="py-3 px-2 text-right font-mono text-sm">{s.avgV.toFixed(1)}</td>
                       <td className="py-3 px-2 text-right font-mono text-sm">{s.avgVB.toFixed(1)}</td>
-                      <td className="py-3 px-2 text-right font-mono text-sm">{s.avgHB.toFixed(1)}</td>
-                      <td className="py-3 px-3 text-right font-mono text-slate-700">
-                        {s.avgSpin} rpm ({s.avgEff}%)
-                      </td>
+                      <td className="py-3 px-3 text-right font-mono text-sm">{s.avgHB.toFixed(1)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -877,73 +866,40 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
             </div>
           </div>
 
-          {/* 卡片 2：優勢與重點改善 (優勢 3 / 重點改善 3) */}
-          <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-md border border-slate-200 space-y-4">
+          {/* 卡片 2：優勢與重點改善 (簡明標籤式，不放長篇文字) */}
+          <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-3">
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-base font-extrabold text-slate-900">優勢與重點改善</h4>
                 <p className="text-xs text-slate-500">優勢 3 / 重點改善 3</p>
               </div>
-              <span className="rounded-full bg-sky-100 px-2.5 py-0.5 text-[11px] font-bold text-sky-800">
-                AI 生物力學診斷
-              </span>
+              <span className="text-xs font-bold text-[#0b72b9]">🔓</span>
             </div>
 
-            <div className="space-y-2.5">
-              <div className="rounded-2xl bg-emerald-50 p-3.5 border border-emerald-200">
-                <div className="text-xs font-extrabold text-emerald-800">
-                  ✓ 優勢 1：出色的垂直上竄尾勁（平均 VB {avgVB.toFixed(1)} cm）
-                </div>
-                <p className="mt-1 text-xs text-emerald-900/80 leading-relaxed">
-                  您的主戰速球具備極佳的馬格努斯上竄位移（{avgVB.toFixed(1)} cm），代表手指在釋球瞬間能給予球心紮實的純背旋，進壘時視覺上竄感明顯，高角度進壘極易誘使打者揮空。
-                </p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 text-xs font-bold">
+              <div className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-3.5 py-2.5 text-emerald-900 border border-emerald-200">
+                <span className="text-emerald-600">●</span>
+                <span>垂直上竄量優異 ({avgVB.toFixed(1)} cm)</span>
               </div>
-
-              <div className="rounded-2xl bg-emerald-50 p-3.5 border border-emerald-200">
-                <div className="text-xs font-extrabold text-emerald-800">
-                  ✓ 優勢 2：轉速與有效轉速穩定（平均 {avgSpin} rpm · 效率 {avgEff}%）
-                </div>
-                <p className="mt-1 text-xs text-emerald-900/80 leading-relaxed">
-                  本場次平均總轉速達 {avgSpin} rpm，旋轉效率維持在 {avgEff}%，顯示手腕與手指扣球軸線穩定，能量傳遞損耗低。
-                </p>
+              <div className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-3.5 py-2.5 text-emerald-900 border border-emerald-200">
+                <span className="text-emerald-600">●</span>
+                <span>轉速穩定 ({avgSpin} rpm · {avgEff}%)</span>
               </div>
-
-              <div className="rounded-2xl bg-emerald-50 p-3.5 border border-emerald-200">
-                <div className="text-xs font-extrabold text-emerald-800">
-                  ✓ 優勢 3：自然的橫向尾勁延伸（平均 HB {avgHB.toFixed(1)} cm）
-                </div>
-                <p className="mt-1 text-xs text-emerald-900/80 leading-relaxed">
-                  球路帶有 {avgHB.toFixed(1)} cm 的手臂側橫向位移，搭配 {avgSpeed.toFixed(1)} km/h 均速，能有效擠壓右打者內角與左打者外角好球帶邊緣。
-                </p>
+              <div className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-3.5 py-2.5 text-emerald-900 border border-emerald-200">
+                <span className="text-emerald-600">●</span>
+                <span>橫向尾勁延伸 ({avgHB.toFixed(1)} cm)</span>
               </div>
-            </div>
-
-            <div className="space-y-2.5 pt-1">
-              <div className="rounded-2xl bg-amber-50 p-3.5 border border-amber-200">
-                <div className="text-xs font-extrabold text-amber-900">
-                  ⚡ 重點改善 1：降低陀螺角度（目前約 {Math.round((Math.acos(Math.min(0.99, avgEff / 100)) * 180) / Math.PI)}°）以突破 90% 旋轉效率
-                </div>
-                <p className="mt-1 text-xs text-amber-900/80 leading-relaxed">
-                  部分投球出手時食指與中指施力略偏球體側邊，產生約 {100 - avgEff}% 的陀螺旋轉耗損。建議進行近距離四縫線雙指正後方彈指練習，可再提升 5~8 cm 垂直上竄量。
-                </p>
+              <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-amber-900 border border-amber-200">
+                <span className="text-amber-600">▲</span>
+                <span>陀螺角可再收斂至 25° 內</span>
               </div>
-
-              <div className="rounded-2xl bg-amber-50 p-3.5 border border-amber-200">
-                <div className="text-xs font-extrabold text-amber-900">
-                  ⚡ 重點改善 2：縮小連續投球間的旋轉方向離散度
-                </div>
-                <p className="mt-1 text-xs text-amber-900/80 leading-relaxed">
-                  本場次旋轉軸介於 00:18 ~ 01:11 之間，代表放球點高度在不同球間略有浮動。固定前導腳落地後的軀幹傾角有助於穩定放球視窗。
-                </p>
+              <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-amber-900 border border-amber-200">
+                <span className="text-amber-600">▲</span>
+                <span>固定放球軸向 (00:45~01:00)</span>
               </div>
-
-              <div className="rounded-2xl bg-amber-50 p-3.5 border border-amber-200">
-                <div className="text-xs font-extrabold text-amber-900">
-                  ⚡ 重點改善 3：建立速差 12~15 km/h 的共軌變化球組合
-                </div>
-                <p className="mt-1 text-xs text-amber-900/80 leading-relaxed">
-                  建議搭配一顆與四縫線相同出手角度（01:00 方向）的變速球或反向橫移滑球，利用共軌效應最大化打者識別延遲。
-                </p>
+              <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-amber-900 border border-amber-200">
+                <span className="text-amber-600">▲</span>
+                <span>搭配 12 km/h 速差變化球</span>
               </div>
             </div>
           </div>

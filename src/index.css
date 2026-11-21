@@ -2,7 +2,8 @@
 
 html,
 body {
-  background-color: #020617;
+  background-color: #f4f6f9;
+  color: #0f172a;
   overscroll-behavior: none;
   -webkit-touch-callout: none;
   -webkit-user-select: none;
@@ -10,8 +11,8 @@ body {
 }
 
 .safe-p {
-  padding-top: max(0.75rem, env(safe-area-inset-top));
-  padding-right: max(0.75rem, env(safe-area-inset-right));
-  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
-  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-right: max(0.5rem, env(safe-area-inset-right));
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  padding-left: max(0.5rem, env(safe-area-inset-left));
 }
