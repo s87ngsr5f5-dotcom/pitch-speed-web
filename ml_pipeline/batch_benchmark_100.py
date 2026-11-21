@@ -348,7 +348,7 @@ def run_100_pitch_benchmark() -> Dict[str, Any]:
         "pitches": pitches_data,
     }
 
-    out_json = root / "public" / "data" / "benchmark_100.json"
+    out_json = root / "ml_pipeline" / "benchmark_100.json"
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -23,19 +23,19 @@ export const SmartScoutPlayerProfile: React.FC<SmartScoutPlayerProfileProps> = (
   const maxSpeed =
     totalCount > 0
       ? Math.max(...allPitches.map((p) => p.speedKmh)).toFixed(1)
-      : '107.0';
+      : '--.-';
   const avgSpeed =
     totalCount > 0
       ? (allPitches.reduce((a, p) => a + p.speedKmh, 0) / totalCount).toFixed(1)
-      : '104.0';
+      : '--.-';
   const maxSpin =
     totalCount > 0
       ? Math.max(...allPitches.map((p) => p.totalSpinRpm))
-      : 2178;
+      : '--';
   const avgVB =
     totalCount > 0
       ? (allPitches.reduce((a, p) => a + p.verticalBreakCm, 0) / totalCount).toFixed(1)
-      : '54.1';
+      : '--.-';
 
   // 活躍熱力方格 (4 列 x 11 欄)
   const months = ['2月', '5月', '8月', '11月'];

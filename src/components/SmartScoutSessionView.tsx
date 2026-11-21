@@ -140,6 +140,20 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
           </button>
         </div>
 
+        {/* 若尚無任何實測場次，顯示簡潔空白提示與開啟相機按鈕 */}
+        {filtered.length === 0 && (
+          <div className="rounded-3xl bg-white p-8 text-center text-slate-900 shadow-sm border border-slate-200 space-y-4">
+            <div className="text-lg font-extrabold text-slate-900">尚無測速場次紀錄</div>
+            <button
+              type="button"
+              onClick={() => onStartNewRecording()}
+              className="rounded-2xl bg-[#0b72b9] px-6 py-3 text-sm font-extrabold text-white shadow hover:bg-[#0962a0] transition"
+            >
+              開啟相機開始測速
+            </button>
+          </div>
+        )}
+
         {/* 依月份分組的場次卡片 */}
         {Array.from(groupedByMonth.entries()).map(([month, monthSessions]) => (
           <div key={month} className="space-y-3">
