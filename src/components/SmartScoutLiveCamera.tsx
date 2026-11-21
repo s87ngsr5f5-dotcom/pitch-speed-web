@@ -9,6 +9,7 @@ import {
 } from '../data/smartScoutDefaultSessions';
 import { DEFAULT_TUNNEL_CONFIGS, MAX_PITCH_SAMPLE_GAP_MS } from '../core/smartScoutEngine';
 import { BallDetection, Point2D, TunnelBoxConfig } from '../types';
+import { VideoFlightReview } from './VideoFlightReview';
 
 interface VideoFrameMetadata {
   presentationTime: number;
@@ -93,6 +94,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const [captureMessage, setCaptureMessage] = useState('');
   const [fileEnded, setFileEnded] = useState(false);
   const [filePlaying, setFilePlaying] = useState(false);
+  const [reviewingFlight, setReviewingFlight] = useState(false);
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 720 });
   const [showRibbon, setShowRibbon] = useState<boolean>(true);
   const [showStatsCard, setShowStatsCard] = useState<boolean>(true);
@@ -252,6 +254,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const sendFrame = (mediaTime: number) => {
       if (
         !isWorkerReady ||
+        reviewingFlight ||
         calibrating ||
         discipline !== 'pitching' ||
         isBusyRef.current ||
@@ -327,7 +330,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         cancelAnimationFrame(rafId);
       }
     };
-  }, [calibrating, cameraAngle, discipline, isWorkerReady, isBusyRef, onFrame, resetTrack, uploadedVideoUrl]);
+  }, [calibrating, cameraAngle, discipline, isWorkerReady, isBusyRef, onFrame, resetTrack, reviewingFlight, uploadedVideoUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -773,7 +776,16 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             改回自動辨識
           </button>
         )}
+        {uploadedVideoUrl && !calibrating && (
+          <button type="button" className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
+            onClick={() => { videoRef.current?.pause(); resetTrack(); setReviewingFlight(true); }}>
+            手動核對影片時間
+          </button>
+        )}
       </div>
+      {reviewingFlight && uploadedVideoUrl && (
+        <VideoFlightReview url={uploadedVideoUrl} onClose={() => setReviewingFlight(false)} />
+      )}
 
       {/* 3D 漸變紅色彗星彩帶軌跡 (#7f1022 -> #ef233c) + 末端立體小白球(含縫線與陰影) */}
       <svg
