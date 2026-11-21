@@ -92,6 +92,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const [selectedPitchType, setSelectedPitchType] = useState('未標記');
   const [captureMessage, setCaptureMessage] = useState('');
   const [fileEnded, setFileEnded] = useState(false);
+  const [filePlaying, setFilePlaying] = useState(false);
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 720 });
   const [showRibbon, setShowRibbon] = useState<boolean>(true);
   const [showStatsCard, setShowStatsCard] = useState<boolean>(true);
@@ -330,7 +331,11 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !uploadedVideoUrl || !isWorkerReady || discipline !== 'pitching') return;
-    void video.play().catch(() => setCaptureMessage('無法自動播放。請按「重新分析」。'));
+    void video.play().catch((error: DOMException) => {
+      if (error.name !== 'AbortError') {
+        setCaptureMessage('無法自動播放。請按「播放並分析」。');
+      }
+    });
   }, [discipline, isWorkerReady, uploadedVideoUrl]);
 
   const captureVideoSnapshot = useCallback((): string | undefined => {
@@ -464,9 +469,15 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     e.currentTarget.value = '';
+    const video = videoRef.current;
+    if (video?.srcObject instanceof MediaStream) {
+      video.srcObject.getTracks().forEach((track) => track.stop());
+      video.srcObject = null;
+    }
     setCaptureMessage('');
     setHasLiveCamera(false);
     setFileEnded(false);
+    setFilePlaying(false);
     measuredInFileRef.current = 0;
     setCalibration(null);
     setFileCheckpoints(null);
@@ -481,8 +492,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     setFileEnded(false);
     measuredInFileRef.current = 0;
     setCaptureMessage('');
-    video.currentTime = 0;
-    void video.play().catch(() => setCaptureMessage('無法播放這部影片。'));
+    if (video.readyState >= 1) video.currentTime = 0;
+    void video.play().catch(() => setCaptureMessage(
+      '無法播放這部影片。請試用 H.264 編碼的 MP4。'
+    ));
   };
 
   const applyCalibration = (event: React.MouseEvent<SVGRectElement>) => {
@@ -595,8 +608,12 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         src={uploadedVideoUrl ?? undefined}
         playsInline
         muted
+        preload="metadata"
         autoPlay={!uploadedVideoUrl}
+        onPlaying={() => setFilePlaying(true)}
+        onPause={() => setFilePlaying(false)}
         onEnded={() => {
+          setFilePlaying(false);
           setFileEnded(true);
           if (measuredInFileRef.current === 0) {
             setCaptureMessage('影片沒有取得完整球路。請調整測速框，或選用涵蓋出手和本壘的影片。');
@@ -613,7 +630,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             setFrameSize({ width: video.videoWidth, height: video.videoHeight });
           }
         }}
-        onError={() => setCaptureMessage('無法播放這部影片，請改用支援的 MP4 影片。')}
+        onError={() => {
+          setFilePlaying(false);
+          setCaptureMessage('無法讀取影片。若檔案在雲端，請先下載到手機；也可試用 H.264 編碼的 MP4。');
+        }}
         className="absolute inset-0 h-full w-full object-contain bg-slate-950"
       />
 
@@ -703,13 +723,14 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
               ? calibration.release ? '點選球通過本壘的位置' : '點選投手放球的位置'
               : '固定鏡頭，讓出手位置與本壘對準測速框。')}
         </p>
-        {uploadedVideoUrl && fileEnded && !calibrating && (
+        {uploadedVideoUrl && !filePlaying && !calibrating && !workerError && (
           <button
             type="button"
             onClick={restartAnalysis}
-            className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline"
+            disabled={!isWorkerReady}
+            className="mt-1 rounded px-2 py-1 font-semibold text-sky-200 underline disabled:opacity-60"
           >
-            重新分析
+            {!isWorkerReady ? '等待模型載入' : fileEnded ? '重新分析' : '播放並分析'}
           </button>
         )}
         {!workerError && discipline === 'pitching' && (hasLiveCamera || uploadedVideoUrl) && (
