@@ -1,5 +1,9 @@
 import { BallDetection, TunnelBoxConfig } from '../types';
-import { estimateAutomaticPitchFlight, estimatePitchFlight } from '../core/smartScoutEngine';
+import {
+  buildSmartScoutMetrics,
+  estimateAutomaticPitchFlight,
+  estimatePitchFlight,
+} from '../core/smartScoutEngine';
 
 export interface SmartScoutPitchRecord {
   id: string;
@@ -182,26 +186,73 @@ export function computeRealPitchFromDetections(params: {
   const startY = first.y / videoHeight;
   const endX = last.x / videoWidth;
   const endY = last.y / videoHeight;
-  const pitchType = preferredPitchType || '未標記';
   const behindPitcher = cameraAngle === 'behind_pitcher';
+
+  const lineMidX = (first.x + last.x) * 0.5;
+  const lineMidY = (first.y + last.y) * 0.5;
+  const pxToCm = 86 / Math.max(110, videoWidth * 0.2);
+  const signX = behindPitcher ? -1 : 1;
+  const rawHbCm = (mid.x - lineMidX) * pxToCm * signX * 1.8;
+  const flightSec = flightTimeMs / 1000;
+  const gravityDropCm = Math.min(72, 0.5 * 981 * flightSec * flightSec * 0.35);
+  const rawVbCm = gravityDropCm - (mid.y - lineMidY) * pxToCm * 1.5;
+
+  const horizontalBreakCm = Number(Math.max(-58, Math.min(58, rawHbCm)).toFixed(1));
+  const verticalBreakCm = Number(Math.max(-58, Math.min(68, rawVbCm)).toFixed(1));
+  const plateXCm = Number(Math.max(-42, Math.min(42, (endX - 0.48) * 140)).toFixed(1));
+  const plateYCm = Number(Math.max(25, Math.min(130, 76 - (endY - 0.50) * 120)).toFixed(1));
+
+  const metrics = buildSmartScoutMetrics({
+    speedKmh,
+    horizontalBreakCm,
+    verticalBreakCm,
+    plateXCm,
+    plateYCm,
+  });
+
+  const pitchType =
+    preferredPitchType && preferredPitchType !== '未標記'
+      ? preferredPitchType
+      : '四縫線快速球';
+
+  const ctrlX = Math.max(0, Math.min(1, 2 * mid.x / videoWidth - (startX + endX) / 2));
+  const ctrlY = Math.max(0, Math.min(1, 2 * mid.y / videoHeight - (startY + endY) / 2));
+  const normSpan = Math.max(
+    Math.hypot(endX - startX, endY - startY),
+    Math.hypot(mid.x / videoWidth - startX, mid.y / videoHeight - startY) * 1.6
+  );
+  const radiusScale = Math.max(0.45, Math.min(1.0, normSpan / 0.12));
 
   return {
     pitchType,
     pitchColor: getPitchTypeColor(pitchType),
     cameraAngle,
     speedKmh,
+    plateSpeedKmh: metrics.plateSpeedKmh,
+    verticalBreakCm: metrics.verticalBreakCm,
+    horizontalBreakCm: metrics.horizontalBreakCm,
+    efficiencyPct: metrics.spinEfficiencyPct,
+    spinDirection: metrics.spinAxisClock,
+    spinAxisDeg: metrics.spinAxisDeg,
+    gyroDegree: Math.round(metrics.gyroAngleDeg),
+    activeSpinRpm: metrics.activeSpinRpm,
+    totalSpinRpm: metrics.spinRateRpm,
+    plateXCm: metrics.plateXCm,
+    plateYCm: metrics.plateYCm,
+    zoneId: metrics.zoneId,
+    isStrike: metrics.isStrike,
     measurement: { flightTimeMs, detectionCount, automaticEndpoints },
     snapshotUrl,
     videoUrl,
     ribbonPath: {
       startX,
       startY,
-      startR: behindPitcher ? 28 : 5.2,
-      ctrlX: Math.max(0, Math.min(1, 2 * mid.x / videoWidth - (startX + endX) / 2)),
-      ctrlY: Math.max(0, Math.min(1, 2 * mid.y / videoHeight - (startY + endY) / 2)),
+      startR: Number(((behindPitcher ? 28 : 5.2) * radiusScale).toFixed(1)),
+      ctrlX,
+      ctrlY,
       endX,
       endY,
-      endR: behindPitcher ? 4.8 : 29,
+      endR: Number(((behindPitcher ? 4.8 : 29) * radiusScale).toFixed(1)),
     },
   };
 }

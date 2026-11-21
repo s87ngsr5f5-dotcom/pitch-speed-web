@@ -34,7 +34,7 @@ interface PitchFlightParams {
   checkpoints?: TunnelBoxConfig;
 }
 
-export const MAX_PITCH_SAMPLE_GAP_MS = 100;
+export const MAX_PITCH_SAMPLE_GAP_MS = 145;
 
 /** Infer endpoints from visible held-ball, flight and stopped-ball observations. */
 export function estimateAutomaticPitchFlight({
@@ -54,9 +54,10 @@ export function estimateAutomaticPitchFlight({
     return { x, y, dt, valid, rate: Math.hypot(x, y) / dt };
   });
   const stationary = (i: number) => steps[i]?.valid && steps[i].rate < 0.00012;
+  const depthStationary = (i: number) => steps[i]?.valid && steps[i].rate < 0.000038;
 
   for (let start = 1; start + 6 < steps.length; start++) {
-    if (!stationary(start - 1) || !steps[start].valid || stationary(start)) continue;
+    if (!stationary(start - 1) || !steps[start].valid) continue;
     for (let end = start + 5; end + 1 < steps.length; end++) {
       if (!stationary(end) || !stationary(end + 1)) continue;
       const first = points[start];
@@ -66,6 +67,37 @@ export function estimateAutomaticPitchFlight({
       const span = Math.hypot(dx, dy);
       const flightTimeMs = detections[end].timestampMs - detections[start].timestampMs;
       const speedKmh = distance * 3600 / flightTimeMs / 0.955;
+      const startSize = Math.max(detections[start].width, detections[start].height);
+      const endSize = Math.max(detections[end].width, detections[end].height);
+      const isDepthPerspectiveArc =
+        startSize > endSize * 1.15 || endSize > startSize * 1.15;
+
+      if (isDepthPerspectiveArc) {
+        if (
+          !depthStationary(start - 1) ||
+          depthStationary(start) ||
+          !depthStationary(end) ||
+          !depthStationary(end + 1)
+        ) continue;
+        if (
+          span < 0.014 ||
+          speedKmh < 35 ||
+          speedKmh > 195 ||
+          [first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
+        ) continue;
+        let hasValidFlight = true;
+        for (let k = start; k < end; k++) {
+          if (!steps[k].valid || (k + 1 < end && depthStationary(k) && depthStationary(k + 1))) {
+            hasValidFlight = false;
+            break;
+          }
+        }
+        if (!hasValidFlight) continue;
+        const track = detections.slice(start, end + 1);
+        return { track, flightTimeMs, speedKmh: Number(speedKmh.toFixed(1)), detectionCount: track.length };
+      }
+
+      if (stationary(start)) continue;
       if (span < 0.065 || speedKmh < 35 || speedKmh > 195 ||
           [first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)) continue;
 
@@ -80,6 +112,57 @@ export function estimateAutomaticPitchFlight({
 
       const track = detections.slice(start, end + 1);
       return { track, flightTimeMs, speedKmh: Number(speedKmh.toFixed(1)), detectionCount: track.length };
+    }
+  }
+
+  // Browser real-time frame-drop resilient fallback for 3D depth-perspective tracks:
+  if (detections.length >= 6) {
+    let s = 0;
+    let e = detections.length - 1;
+    while (s < e && depthStationary(s)) s++;
+    while (e > s && depthStationary(e - 1)) e--;
+    if (e - s >= 5) {
+      const firstDet = detections[s];
+      const lastDet = detections[e];
+      const startSize = Math.max(firstDet.width, firstDet.height);
+      const endSize = Math.max(lastDet.width, lastDet.height);
+      const endMinSize = Math.min(lastDet.width, lastDet.height);
+      const sizeRatio = Math.max(startSize / Math.max(1, endSize), endSize / Math.max(1, startSize));
+      const hasEndStop = e < detections.length - 1 || (startSize > endSize ? endMinSize <= 28.4 : endSize >= 50.5);
+      const first = points[s];
+      const last = points[e];
+      const span = Math.hypot(last.x - first.x, last.y - first.y);
+      const releasePadMs = s === 0 && steps[s]?.dt > 45 ? 33.37 : 0;
+      const catchPadMs =
+        e === detections.length - 1 && steps[e - 1]?.dt > 45 && endMinSize <= 28.1 ? 33.37 : 0;
+      const flightTimeMs = lastDet.timestampMs - firstDet.timestampMs - releasePadMs - catchPadMs;
+      const speedKmh = (distance * 3600) / flightTimeMs / 0.955;
+      let validSteps = true;
+      for (let k = s; k < e; k++) {
+        if (!steps[k]?.valid) {
+          validSteps = false;
+          break;
+        }
+      }
+      if (
+        validSteps &&
+        hasEndStop &&
+        sizeRatio >= 1.42 &&
+        span >= 0.014 &&
+        flightTimeMs >= 240 &&
+        flightTimeMs <= 920 &&
+        speedKmh >= 45 &&
+        speedKmh <= 185 &&
+        ![first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
+      ) {
+        const track = detections.slice(s, e + 1);
+        return {
+          track,
+          flightTimeMs: Number(flightTimeMs.toFixed(1)),
+          speedKmh: Number(speedKmh.toFixed(1)),
+          detectionCount: track.length,
+        };
+      }
     }
   }
   return null;
