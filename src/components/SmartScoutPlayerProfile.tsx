@@ -178,10 +178,18 @@ export const SmartScoutPlayerProfile: React.FC<SmartScoutPlayerProfileProps> = (
           ))}
         </div>
 
-        {/* 球員生涯核心指標卡片 */}
-        <div className="grid grid-cols-2 gap-3 pt-1">
+        {/* 球員生涯核心指標卡片 (累計追蹤球數、最高球速、平均球速、最高轉速、平均垂直上竄量) */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-1">
           <div className="rounded-2xl bg-slate-100 p-3.5 border border-slate-200">
-            <div className="text-xs text-slate-500">最高初速 (MAX V)</div>
+            <div className="text-xs text-slate-500">累計追蹤球數</div>
+            <div className="mt-1 flex items-baseline gap-1">
+              <span className="text-2xl font-black text-slate-900">{totalCount}</span>
+              <span className="text-xs text-slate-500">球</span>
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-slate-100 p-3.5 border border-slate-200">
+            <div className="text-xs text-slate-500">最高球速 (MAX V)</div>
             <div className="mt-1 flex items-baseline gap-1">
               <span className="text-2xl font-black text-slate-900">{maxSpeed}</span>
               <span className="text-xs text-slate-500">km/h</span>
@@ -189,7 +197,7 @@ export const SmartScoutPlayerProfile: React.FC<SmartScoutPlayerProfileProps> = (
           </div>
 
           <div className="rounded-2xl bg-slate-100 p-3.5 border border-slate-200">
-            <div className="text-xs text-slate-500">平均初速 (AVG V)</div>
+            <div className="text-xs text-slate-500">平均球速 (AVG V)</div>
             <div className="mt-1 flex items-baseline gap-1">
               <span className="text-2xl font-black text-[#0b72b9]">{avgSpeed}</span>
               <span className="text-xs text-slate-500">km/h</span>
@@ -204,8 +212,8 @@ export const SmartScoutPlayerProfile: React.FC<SmartScoutPlayerProfileProps> = (
             </div>
           </div>
 
-          <div className="rounded-2xl bg-slate-100 p-3.5 border border-slate-200">
-            <div className="text-xs text-slate-500">平均垂直變化量 (VB)</div>
+          <div className="rounded-2xl bg-slate-100 p-3.5 border border-slate-200 sm:col-span-2">
+            <div className="text-xs text-slate-500">平均垂直上竄量 (VB)</div>
             <div className="mt-1 flex items-baseline gap-1">
               <span className="text-2xl font-black text-rose-600">{avgVB}</span>
               <span className="text-xs text-slate-500">cm</span>

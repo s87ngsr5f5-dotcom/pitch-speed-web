@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   SMARTSCOUT_PITCH_TYPES,
   SmartScoutPitchRecord,
+  buildTaperedRibbonPolygon,
   getPitchTypeColor,
+  sampleQuadraticRibbon,
 } from '../data/smartScoutDefaultSessions';
 
 interface SmartScoutPitchPlayerProps {
@@ -13,66 +15,6 @@ interface SmartScoutPitchPlayerProps {
   onChangePitchType?: (pitchId: string, newType: string) => void;
   onPrevPitch?: () => void;
   onNextPitch?: () => void;
-}
-
-interface RibbonSample {
-  x: number;
-  y: number;
-  r: number;
-}
-
-function sampleQuadraticRibbon(
-  path: SmartScoutPitchRecord['ribbonPath'],
-  width: number,
-  height: number,
-  maxT: number,
-  steps = 48
-): RibbonSample[] {
-  const sx = path.startX * width;
-  const sy = path.startY * height;
-  const cx = path.ctrlX * width;
-  const cy = path.ctrlY * height;
-  const ex = path.endX * width;
-  const ey = path.endY * height;
-
-  const scale = Math.min(width, height) / 420;
-  const sr = path.startR * scale;
-  const er = path.endR * scale;
-
-  const out: RibbonSample[] = [];
-  const count = Math.max(2, Math.round(steps * Math.max(0.05, maxT)));
-  for (let i = 0; i <= count; i++) {
-    const t = (i / count) * maxT;
-    const inv = 1 - t;
-    const x = inv * inv * sx + 2 * inv * t * cx + t * t * ex;
-    const y = inv * inv * sy + 2 * inv * t * cy + t * t * ey;
-    const r = sr + (er - sr) * Math.pow(t, 0.85);
-    out.push({ x, y, r });
-  }
-  return out;
-}
-
-function buildTaperedRibbonPolygon(samples: RibbonSample[]): string {
-  if (samples.length < 2) return '';
-  const leftPts: Array<{ x: number; y: number }> = [];
-  const rightPts: Array<{ x: number; y: number }> = [];
-
-  for (let i = 0; i < samples.length; i++) {
-    const curr = samples[i];
-    const prev = samples[Math.max(0, i - 1)];
-    const next = samples[Math.min(samples.length - 1, i + 1)];
-    const dx = next.x - prev.x;
-    const dy = next.y - prev.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const nx = -dy / len;
-    const ny = dx / len;
-
-    leftPts.push({ x: curr.x + nx * curr.r, y: curr.y + ny * curr.r });
-    rightPts.push({ x: curr.x - nx * curr.r, y: curr.y - ny * curr.r });
-  }
-
-  const all = [...leftPts, ...rightPts.reverse()];
-  return all.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
 }
 
 export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
@@ -170,8 +112,60 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
     setIsPlaying(true);
   };
 
+  const handleDownloadSnapshot = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = stageW;
+    canvas.height = stageH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const grad = ctx.createLinearGradient(0, 0, 0, stageH);
+    grad.addColorStop(0, '#0f172a');
+    grad.addColorStop(1, '#1e293b');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, stageW, stageH);
+
+    if (showRibbon && ribbonSamples.length >= 2 && firstSample && lastSample) {
+      const rGrad = ctx.createLinearGradient(
+        firstSample.x,
+        firstSample.y,
+        lastSample.x,
+        lastSample.y
+      );
+      rGrad.addColorStop(0, 'rgba(127, 16, 34, 0.92)');
+      rGrad.addColorStop(1, 'rgba(239, 35, 60, 0.95)');
+      ctx.fillStyle = rGrad;
+      for (const s of ribbonSamples) {
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    if (showStatsCard) {
+      ctx.fillStyle = 'rgba(24, 16, 14, 0.88)';
+      ctx.beginPath();
+      ctx.roundRect(22, stageH - 320, stageW - 44, 245, 22);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '900 52px sans-serif';
+      ctx.fillText(`${pitch.speedKmh.toFixed(1)} km/h`, 46, stageH - 230);
+      ctx.font = 'bold 20px sans-serif';
+      ctx.fillText(
+        `${pitch.pitchType} | VB ${pitch.verticalBreakCm}cm | HB ${pitch.horizontalBreakCm}cm | ${pitch.totalSpinRpm} rpm`,
+        46,
+        stageH - 150
+      );
+    }
+
+    const link = document.createElement('a');
+    link.download = `smartscout-pitch-${pitch.pitchNumber}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  };
+
   return (
-    <div className="relative mx-auto flex h-[calc(100dvh-64px)] max-h-[920px] w-full max-w-[460px] flex-col overflow-hidden rounded-none sm:rounded-3xl bg-slate-900 shadow-2xl select-none">
+    <div className="relative mx-auto flex h-[calc(100dvh-64px)] max-h-[920px] w-full max-w-[460px] flex-col overflow-hidden rounded-none sm:rounded-3xl bg-slate-950 shadow-2xl select-none">
       {/* 實測擷取之相機畫面或上傳之真實影片 */}
       {pitch.videoUrl ? (
         <video
@@ -189,11 +183,18 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
           className="absolute inset-0 h-full w-full object-cover"
         />
       ) : (
-        <div className="absolute inset-0 bg-slate-900" />
+        <div
+          className="absolute inset-0 opacity-45"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 50% 45%, rgba(11, 114, 185, 0.28), transparent 70%), linear-gradient(to right, rgba(148, 163, 184, 0.12) 1px, transparent 1px), linear-gradient(to bottom, rgba(148, 163, 184, 0.12) 1px, transparent 1px)',
+            backgroundSize: '100% 100%, 44px 44px, 44px 44px',
+          }}
+        />
       )}
 
-      {/* 頂部導覽列 (< 投球 #1 🗑) */}
-      <div className="relative z-20 flex items-center justify-between px-4 pt-4 pb-3 bg-gradient-to-b from-black/60 via-black/25 to-transparent text-white">
+      {/* 頂部導覽列 (< 投球 #N 🗑) */}
+      <div className="relative z-20 flex items-center justify-between px-4 pt-4 pb-3 bg-gradient-to-b from-black/65 via-black/25 to-transparent text-white">
         <button
           type="button"
           onClick={onBack}
@@ -210,7 +211,7 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
             <button
               type="button"
               onClick={onPrevPitch}
-              className="rounded-full bg-black/25 px-2 py-0.5 text-xs font-bold text-white/80 hover:bg-black/45"
+              className="rounded-full bg-black/25 px-2.5 py-0.5 text-xs font-bold text-white/90 hover:bg-black/45"
             >
               ◀
             </button>
@@ -222,7 +223,7 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
             <button
               type="button"
               onClick={onNextPitch}
-              className="rounded-full bg-black/25 px-2 py-0.5 text-xs font-bold text-white/80 hover:bg-black/45"
+              className="rounded-full bg-black/25 px-2.5 py-0.5 text-xs font-bold text-white/90 hover:bg-black/45"
             >
               ▶
             </button>
@@ -238,28 +239,23 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
           className="flex h-10 w-10 items-center justify-center rounded-full bg-black/25 backdrop-blur-sm hover:bg-rose-600/70 transition"
           aria-label="刪除此球"
         >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="3 6 5 6 21 6" />
-            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-            <path d="M10 11v6M14 11v6" />
-            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-          </svg>
+          🗑
         </button>
       </div>
 
-      {/* 3D 紅色漸變彗星彩帶軌跡 */}
+      {/* 3D 漸變紅色彗星彩帶軌跡 (#7f1022 -> #ef233c) + 末端立體小白球 */}
       <svg
         viewBox={`0 0 ${stageW} ${stageH}`}
         className="pointer-events-none absolute inset-0 z-10 h-full w-full"
       >
         <defs>
           <linearGradient id="smartScoutRibbonGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#ff2e24" stopOpacity="0.95" />
-            <stop offset="70%" stopColor="#ff2419" stopOpacity="0.88" />
-            <stop offset="100%" stopColor="#d9231b" stopOpacity="0.76" />
+            <stop offset="0%" stopColor="#7f1022" stopOpacity="0.92" />
+            <stop offset="55%" stopColor="#d9182e" stopOpacity="0.90" />
+            <stop offset="100%" stopColor="#ef233c" stopOpacity="0.96" />
           </linearGradient>
           <filter id="ribbonShadow" x="-15%" y="-15%" width="130%" height="130%">
-            <feDropShadow dx="0" dy="3" stdDeviation="4" floodColor="#7f1d1d" floodOpacity="0.45" />
+            <feDropShadow dx="0" dy="4" stdDeviation="5" floodColor="#4c0519" floodOpacity="0.55" />
           </filter>
         </defs>
 
@@ -272,8 +268,8 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
                 cx={s.x}
                 cy={s.y}
                 r={s.r}
-                fill="#ff281e"
-                fillOpacity={idx === 0 ? 0.65 : 0.86}
+                fill={idx < ribbonSamples.length * 0.35 ? '#9f1229' : '#ef233c'}
+                fillOpacity={idx === 0 ? 0.65 : 0.85}
               />
             ))}
             {firstSample && lastSample && (
@@ -281,18 +277,44 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
                 cx={firstSample.r >= lastSample.r ? firstSample.x : lastSample.x}
                 cy={firstSample.r >= lastSample.r ? firstSample.y : lastSample.y}
                 r={Math.max(firstSample.r, lastSample.r)}
-                fill="#c82219"
+                fill="#be123c"
                 fillOpacity="0.62"
-                stroke="rgba(255, 120, 110, 0.45)"
+                stroke="rgba(255, 160, 170, 0.5)"
                 strokeWidth="1.5"
               />
+            )}
+            {lastSample && (
+              <g>
+                <circle
+                  cx={lastSample.x}
+                  cy={lastSample.y}
+                  r={Math.max(7, lastSample.r * 0.95)}
+                  fill="#ffffff"
+                  stroke="#e2e8f0"
+                  strokeWidth="1.5"
+                />
+                <path
+                  d={`M ${lastSample.x - lastSample.r * 0.45} ${lastSample.y - lastSample.r * 0.55} Q ${lastSample.x} ${lastSample.y} ${lastSample.x - lastSample.r * 0.45} ${lastSample.y + lastSample.r * 0.55}`}
+                  fill="none"
+                  stroke="#dc2626"
+                  strokeWidth="1.6"
+                  strokeDasharray="2.5 2"
+                />
+                <path
+                  d={`M ${lastSample.x + lastSample.r * 0.45} ${lastSample.y - lastSample.r * 0.55} Q ${lastSample.x} ${lastSample.y} ${lastSample.x + lastSample.r * 0.45} ${lastSample.y + lastSample.r * 0.55}`}
+                  fill="none"
+                  stroke="#dc2626"
+                  strokeWidth="1.6"
+                  strokeDasharray="2.5 2"
+                />
+              </g>
             )}
           </g>
         )}
       </svg>
 
-      {/* 右側 4 顆 SmartScout 懸浮操作按鈕 */}
-      <div className="absolute right-4 top-[38%] z-20 flex flex-col items-center gap-5">
+      {/* 右側 4 顆懸浮圓形控制鈕 */}
+      <div className="absolute right-4 top-[36%] z-20 flex flex-col items-center gap-5">
         <button
           type="button"
           onClick={() => setShowRibbon((v) => !v)}
@@ -300,7 +322,7 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
         >
           <span
             className={`flex h-9 w-9 items-center justify-center rounded-full border-[2.5px] border-white shadow-lg ${
-              showRibbon ? 'bg-[#d9261c]' : 'bg-black/40'
+              showRibbon ? 'bg-[#ef233c]' : 'bg-black/40'
             }`}
           />
         </button>
@@ -323,6 +345,18 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
 
         <button
           type="button"
+          onClick={handleDownloadSnapshot}
+          className="flex h-11 w-11 items-center justify-center rounded-full text-white drop-shadow-[0_2px_6px_rgba(0,0,0,0.8)] hover:scale-105 active:scale-95 transition"
+        >
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
           onClick={() => setShowStatsCard((v) => !v)}
           className={`flex h-11 w-11 items-center justify-center rounded-full drop-shadow-[0_2px_6px_rgba(0,0,0,0.8)] hover:scale-105 active:scale-95 transition ${
             showStatsCard ? 'text-white' : 'text-white/45'
@@ -336,18 +370,18 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
         </button>
       </div>
 
-      {/* 底部半透明深色數據卡 + 白色時間軸拉桿 */}
-      <div className="relative z-20 mt-auto px-3.5 pb-4 space-y-3">
+      {/* 底部深色半透明 2x4 八大數據面板 + 時間軸滑桿 */}
+      <div className="relative z-20 mt-auto px-3.5 pb-3.5 space-y-2.5">
         {showStatsCard && (
-          <div className="rounded-2xl bg-[#18110e]/85 backdrop-blur-md px-4 py-3.5 text-white shadow-2xl border border-white/10">
+          <div className="rounded-2xl bg-[#18110e]/88 backdrop-blur-md px-4 py-3 text-white shadow-2xl border border-white/10">
             <div className="flex items-center justify-between gap-2">
               <div>
                 <div className="text-xs font-medium text-neutral-300">初速</div>
                 <div className="flex items-baseline gap-1.5">
-                  <span className="text-[44px] font-bold leading-tight tracking-tight tabular-nums">
+                  <span className="text-[42px] font-bold leading-tight tracking-tight tabular-nums">
                     {pitch.speedKmh.toFixed(1)}
                   </span>
-                  <span className="text-lg font-medium text-neutral-300">km/h</span>
+                  <span className="text-base font-medium text-neutral-300">km/h</span>
                 </div>
               </div>
 
@@ -367,62 +401,99 @@ export const SmartScoutPitchPlayer: React.FC<SmartScoutPitchPlayerProps> = ({
               </div>
             </div>
 
-            <div className="mt-2 grid grid-cols-4 gap-1 text-center">
-              <div>
-                <div className="text-[11px] text-neutral-400">垂直變化量</div>
-                <div className="mt-0.5 text-xl font-bold tabular-nums">
+            <div className="mt-2 grid grid-cols-4 gap-1.5 text-center">
+              <div className="rounded-xl bg-white/5 py-1.5 px-1">
+                <div className="text-[10px] text-neutral-400">VB [cm] 垂直</div>
+                <div className="mt-0.5 text-lg font-bold tabular-nums">
                   {pitch.verticalBreakCm.toFixed(1)}
-                  <span className="ml-0.5 text-xs font-normal text-neutral-300">cm</span>
                 </div>
               </div>
-              <div>
-                <div className="text-[11px] text-neutral-400">水平變化量</div>
-                <div className="mt-0.5 text-xl font-bold tabular-nums">
-                  {pitch.horizontalBreakCm.toFixed(1)}
-                  <span className="ml-0.5 text-xs font-normal text-neutral-300">cm</span>
-                </div>
-              </div>
-              <div>
-                <div className="text-[11px] text-neutral-400">轉速</div>
-                <div className="mt-0.5 text-xl font-bold tabular-nums">
-                  {pitch.totalSpinRpm}
-                  <span className="ml-0.5 text-xs font-normal text-neutral-300">rpm</span>
-                </div>
-              </div>
-              <div>
-                <div className="text-[11px] text-neutral-400">有效轉速</div>
-                <div className="mt-0.5 text-xl font-bold tabular-nums">
-                  {pitch.activeSpinRpm}
-                  <span className="ml-0.5 text-xs font-normal text-neutral-300">rpm</span>
-                </div>
-              </div>
-            </div>
 
-            <div className="mt-3 grid grid-cols-4 gap-1 text-center">
-              <div>
-                <div className="text-[11px] text-neutral-400">效率</div>
-                <div className="mt-0.5 text-xl font-bold tabular-nums">
-                  {pitch.efficiencyPct}
-                  <span className="ml-0.5 text-xs font-normal text-neutral-300">%</span>
+              <div className="rounded-xl bg-white/5 py-1.5 px-1">
+                <div className="text-[10px] text-neutral-400">HB [cm] 水平</div>
+                <div className="mt-0.5 text-lg font-bold tabular-nums">
+                  {pitch.horizontalBreakCm.toFixed(1)}
                 </div>
               </div>
-              <div>
-                <div className="text-[11px] text-neutral-400">旋轉方向</div>
-                <div className="mt-0.5 text-xl font-bold tabular-nums">{pitch.spinDirection}</div>
-              </div>
-              <div>
-                <div className="text-[11px] text-neutral-400">陀螺角度</div>
-                <div className="mt-0.5 text-xl font-bold tabular-nums">
-                  {pitch.gyroDegree}
-                  <span className="ml-0.5 text-xs font-normal text-neutral-300">°</span>
+
+              <div className="rounded-xl bg-white/5 py-1.5 px-1">
+                <div className="text-[10px] text-neutral-400">E [%] 效率</div>
+                <div className="mt-0.5 text-lg font-bold tabular-nums">
+                  {pitch.efficiencyPct}%
                 </div>
               </div>
-              <div />
+
+              <div className="rounded-xl bg-white/5 py-1.5 px-1 flex flex-col items-center justify-center">
+                <div className="text-[10px] text-neutral-400">SD 旋轉方向</div>
+                <div className="mt-0.5 flex items-center gap-1">
+                  <span className="text-base font-bold tabular-nums">{pitch.spinDirection}</span>
+                  <span
+                    className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-white/50 text-[9px]"
+                    style={{
+                      transform: `rotate(${90 - (pitch.spinAxisDeg ?? 45)}deg)`,
+                    }}
+                  >
+                    ↑
+                  </span>
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-white/5 py-1.5 px-1">
+                <div className="text-[10px] text-neutral-400">GD [°] 陀螺角</div>
+                <div className="mt-0.5 text-lg font-bold tabular-nums">{pitch.gyroDegree}°</div>
+              </div>
+
+              <div className="rounded-xl bg-white/5 py-1.5 px-1">
+                <div className="text-[10px] text-neutral-400">AS [rpm] 有效</div>
+                <div className="mt-0.5 text-lg font-bold tabular-nums">{pitch.activeSpinRpm}</div>
+              </div>
+
+              <div className="rounded-xl bg-white/5 py-1.5 px-1">
+                <div className="text-[10px] text-neutral-400">S [rpm] 轉速</div>
+                <div className="mt-0.5 text-lg font-bold tabular-nums">{pitch.totalSpinRpm}</div>
+              </div>
+
+              <div className="rounded-xl bg-white/5 py-1 px-1 flex flex-col items-center justify-center">
+                <div className="text-[10px] text-neutral-400">進壘 #{pitch.zoneId ?? 5}</div>
+                <svg width="26" height="28" viewBox="0 0 30 32" className="mt-0.5">
+                  <rect
+                    x="4"
+                    y="3"
+                    width="22"
+                    height="25"
+                    fill="none"
+                    stroke="rgba(255,255,255,0.65)"
+                    strokeWidth="1.4"
+                  />
+                  <line x1="11.3" y1="3" x2="11.3" y2="28" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
+                  <line x1="18.6" y1="3" x2="18.6" y2="28" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
+                  <line x1="4" y1="11.3" x2="26" y2="11.3" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
+                  <line x1="4" y1="19.6" x2="26" y2="19.6" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
+                  <circle
+                    cx={Math.max(2, Math.min(28, 15 + (pitch.plateXCm / 21.6) * 11))}
+                    cy={Math.max(2, Math.min(30, 15.5 - ((pitch.plateYCm - 76) / 30) * 12))}
+                    r="3.2"
+                    fill="#ef233c"
+                    stroke="#ffffff"
+                    strokeWidth="1"
+                  />
+                </svg>
+              </div>
             </div>
           </div>
         )}
 
-        <div className="px-1">
+        <div className="flex items-center gap-2.5 px-1">
+          <button
+            type="button"
+            onClick={() => {
+              if (progress >= 0.99) setProgress(0.05);
+              setIsPlaying((v) => !v);
+            }}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white text-neutral-950 font-bold text-xs shadow"
+          >
+            {isPlaying ? '❚❚' : '▶'}
+          </button>
           <input
             type="range"
             min={0.05}

@@ -3,7 +3,9 @@ import {
   SMARTSCOUT_PITCH_TYPES,
   SmartScoutPitchRecord,
   SmartScoutSession,
+  buildTaperedRibbonPolygon,
   getPitchTypeColor,
+  sampleQuadraticRibbon,
 } from '../data/smartScoutDefaultSessions';
 
 interface SmartScoutSessionViewProps {
@@ -16,6 +18,64 @@ interface SmartScoutSessionViewProps {
   onStartNewRecording: (sessionId?: string) => void;
   onCreateNewSession: () => void;
 }
+
+const MiniRibbonAndZoneThumb: React.FC<{ pitch: SmartScoutPitchRecord }> = ({ pitch }) => {
+  const samples = useMemo(
+    () => sampleQuadraticRibbon(pitch.ribbonPath, 64, 64, 1, 16),
+    [pitch.ribbonPath]
+  );
+  const poly = useMemo(() => buildTaperedRibbonPolygon(samples), [samples]);
+
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      {/* 3D 彩帶縮圖 */}
+      <div className="flex flex-col items-center">
+        <svg
+          width="46"
+          height="46"
+          viewBox="0 0 64 64"
+          className="rounded-xl bg-slate-900 border border-slate-300"
+        >
+          <polygon points={poly} fill="#ef233c" fillOpacity="0.9" />
+          {samples.length > 0 && (
+            <circle
+              cx={samples[samples.length - 1].x}
+              cy={samples[samples.length - 1].y}
+              r="3.5"
+              fill="#ffffff"
+              stroke="#dc2626"
+              strokeWidth="1"
+            />
+          )}
+        </svg>
+        <span className="mt-0.5 text-[9px] text-slate-400">3D軌跡</span>
+      </div>
+
+      {/* 九宮格落點縮圖 */}
+      <div className="flex flex-col items-center">
+        <svg
+          width="42"
+          height="46"
+          viewBox="0 0 36 40"
+          className="rounded-xl bg-slate-50 border border-slate-200"
+        >
+          <rect x="6" y="5" width="24" height="28" fill="#ffffff" stroke="#475569" strokeWidth="1.4" />
+          <line x1="14" y1="5" x2="14" y2="33" stroke="#cbd5e1" strokeWidth="1" />
+          <line x1="22" y1="5" x2="22" y2="33" stroke="#cbd5e1" strokeWidth="1" />
+          <line x1="6" y1="14.3" x2="30" y2="14.3" stroke="#cbd5e1" strokeWidth="1" />
+          <line x1="6" y1="23.6" x2="30" y2="23.6" stroke="#cbd5e1" strokeWidth="1" />
+          <circle
+            cx={Math.max(3, Math.min(33, 18 + (pitch.plateXCm / 21.6) * 12))}
+            cy={Math.max(3, Math.min(36, 19 - ((pitch.plateYCm - 76) / 30) * 14))}
+            r="3.2"
+            fill="#ef233c"
+          />
+        </svg>
+        <span className="mt-0.5 text-[9px] text-slate-400">#{pitch.zoneId ?? 5}</span>
+      </div>
+    </div>
+  );
+};
 
 export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
   sessions,
@@ -40,7 +100,6 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
     [sessions, selectedSessionId]
   );
 
-  // 依球種彙整平均數據
   const pitchTypeSummaries = useMemo(() => {
     if (!activeSession) return [];
     const groups = new Map<
@@ -50,6 +109,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
         color: string;
         count: number;
         sumV: number;
+        maxV: number;
         sumVB: number;
         sumHB: number;
         sumSpin: number;
@@ -63,6 +123,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
         color: getPitchTypeColor(p.pitchType),
         count: 0,
         sumV: 0,
+        maxV: 0,
         sumVB: 0,
         sumHB: 0,
         sumSpin: 0,
@@ -70,6 +131,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
       };
       curr.count += 1;
       curr.sumV += p.speedKmh;
+      curr.maxV = Math.max(curr.maxV, p.speedKmh);
       curr.sumVB += p.verticalBreakCm;
       curr.sumHB += p.horizontalBreakCm;
       curr.sumSpin += p.totalSpinRpm;
@@ -82,6 +144,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
       color: g.color,
       count: g.count,
       avgV: Number((g.sumV / g.count).toFixed(1)),
+      maxV: Number(g.maxV.toFixed(1)),
       avgVB: Number((g.sumVB / g.count).toFixed(1)),
       avgHB: Number((g.sumHB / g.count).toFixed(1)),
       avgSpin: Math.round(g.sumSpin / g.count),
@@ -89,7 +152,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
     }));
   }, [activeSession]);
 
-  // 1. 若尚未點進特定場次 -> 顯示 SmartScout「場次列表」總覽畫面
+  // 1. 場次總覽列表
   if (!activeSession) {
     const filtered = sessions.filter((s) => {
       if (disciplineFilter !== 'all' && s.discipline !== disciplineFilter) return false;
@@ -108,8 +171,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
 
     return (
       <div className="mx-auto max-w-2xl pb-24 space-y-4">
-        {/* 頂部搜尋列與篩選按鈕 */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2">
           <div className="relative flex-1">
             <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
               🔍
@@ -123,24 +185,30 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
             />
           </div>
 
-          <button
-            type="button"
-            onClick={() =>
-              setDisciplineFilter((prev) =>
-                prev === 'all' ? 'pitching' : prev === 'pitching' ? 'hitting' : 'all'
-              )
-            }
-            className="flex h-12 px-3.5 items-center justify-center rounded-2xl bg-slate-100 text-xs font-bold text-sky-700 border border-slate-200 hover:bg-slate-200 transition shrink-0"
-          >
-            {disciplineFilter === 'all'
-              ? '全部類型'
-              : disciplineFilter === 'pitching'
-                ? '⚾ 僅看投球'
-                : '🏏 僅看打擊'}
-          </button>
+          <div className="flex rounded-2xl bg-white p-1 border border-slate-200 shadow-sm text-xs font-bold">
+            {(
+              [
+                { id: 'all', label: '全部' },
+                { id: 'pitching', label: '投球' },
+                { id: 'hitting', label: '打擊' },
+              ] as const
+            ).map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                onClick={() => setDisciplineFilter(f.id)}
+                className={`rounded-xl px-2.5 py-2 transition ${
+                  disciplineFilter === f.id
+                    ? 'bg-[#0b72b9] text-white'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* 若尚無任何實測場次，顯示簡潔空白提示與開啟相機按鈕 */}
         {filtered.length === 0 && (
           <div className="rounded-3xl bg-white p-8 text-center text-slate-900 shadow-sm border border-slate-200 space-y-4">
             <div className="text-lg font-extrabold text-slate-900">尚無測速場次紀錄</div>
@@ -154,7 +222,6 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
           </div>
         )}
 
-        {/* 依月份分組的場次卡片 */}
         {Array.from(groupedByMonth.entries()).map(([month, monthSessions]) => (
           <div key={month} className="space-y-3">
             <h3 className="px-1 text-sm font-bold text-slate-500">{month}</h3>
@@ -183,18 +250,18 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                     onSelectSession(sess.id);
                     setActiveSubTab('list');
                   }}
-                  className="cursor-pointer rounded-3xl bg-white p-5 text-slate-900 shadow-md border border-slate-200/90 hover:shadow-lg hover:border-sky-300 transition space-y-3"
+                  className="cursor-pointer rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 hover:shadow-md hover:border-sky-300 transition space-y-3"
                 >
                   <div className="flex items-start justify-between">
                     <div>
-                      <h4 className="text-xl font-extrabold text-slate-900">{sess.title}</h4>
+                      <h4 className="text-lg font-extrabold text-slate-900">{sess.title}</h4>
                       <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
                         <span>📅 {sess.date}</span>
                         <span>·</span>
                         <span>
                           {sess.cameraSetup === 'behind_pitcher'
-                            ? '投手正後方視角'
-                            : '投手正前方 / 捕手視角'}
+                            ? '投手正後方'
+                            : '投手正前方'}
                         </span>
                       </div>
                     </div>
@@ -205,7 +272,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                     <>
                       <div className="border-t border-slate-100 pt-3">
                         <span className="inline-flex items-center gap-1.5 rounded-xl bg-rose-100 px-3 py-1 text-xs font-bold text-rose-800">
-                          <span>{sess.discipline === 'hitting' ? '🏏' : '⚾'}</span>
+                          <span>⚾</span>
                           <span>
                             {mainType} {mainTypeCount}/{total}球
                           </span>
@@ -214,9 +281,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
 
                       <div className="grid grid-cols-3 gap-2 pt-1">
                         <div>
-                          <div className="text-xs text-slate-500">
-                            {sess.discipline === 'hitting' ? '平均擊球初速' : '平均球速'}
-                          </div>
+                          <div className="text-xs text-slate-500">平均球速</div>
                           <div className="mt-0.5 flex items-baseline gap-1">
                             <span className="text-2xl font-extrabold tabular-nums text-slate-900">
                               {avgV}
@@ -224,32 +289,22 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                             <span className="text-xs text-slate-500">km/h</span>
                           </div>
                         </div>
-
                         <div>
-                          <div className="text-xs text-slate-500">
-                            {sess.discipline === 'hitting' ? '平均擊球仰角' : '平均縱向位移'}
-                          </div>
+                          <div className="text-xs text-slate-500">平均縱向位移</div>
                           <div className="mt-0.5 flex items-baseline gap-1">
                             <span className="text-2xl font-extrabold tabular-nums text-slate-900">
                               {avgVB}
                             </span>
-                            <span className="text-xs text-slate-500">
-                              {sess.discipline === 'hitting' ? '°' : 'cm'}
-                            </span>
+                            <span className="text-xs text-slate-500">cm</span>
                           </div>
                         </div>
-
                         <div>
-                          <div className="text-xs text-slate-500">
-                            {sess.discipline === 'hitting' ? '平均水平噴射角' : '平均橫向位移'}
-                          </div>
+                          <div className="text-xs text-slate-500">平均橫向位移</div>
                           <div className="mt-0.5 flex items-baseline gap-1">
                             <span className="text-2xl font-extrabold tabular-nums text-slate-900">
                               {avgHB}
                             </span>
-                            <span className="text-xs text-slate-500">
-                              {sess.discipline === 'hitting' ? '°' : 'cm'}
-                            </span>
+                            <span className="text-xs text-slate-500">cm</span>
                           </div>
                         </div>
                       </div>
@@ -261,27 +316,20 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
           </div>
         ))}
 
-        {/* 底部懸浮按鈕列 (邁向下一個層級 + 新增場次) */}
         <div className="fixed bottom-18 inset-x-0 z-30 mx-auto flex max-w-md items-center gap-2.5 px-4">
           <button
             type="button"
-            onClick={() => {
-              const first = sessions[0];
-              if (first) {
-                onSelectSession(first.id);
-                setActiveSubTab('ai_coach');
-              }
-            }}
+            onClick={() => onStartNewRecording()}
             className="flex-1 flex items-center justify-center gap-2 rounded-2xl bg-[#0b72b9] py-3.5 text-sm font-bold text-white shadow-xl hover:bg-[#0962a0] transition"
           >
-            <span>🏅</span>
-            <span>邁向下一個層級（AI 教練完整分析）</span>
+            <span>📹</span>
+            <span>開啟相機測速</span>
           </button>
 
           <button
             type="button"
             onClick={onCreateNewSession}
-            title="新增投球或打擊場次"
+            title="新增場次"
             className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#0b72b9] text-white shadow-xl hover:bg-[#0962a0] transition text-xl font-bold"
           >
             ＋
@@ -291,7 +339,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
     );
   }
 
-  // 2. 已點進特定場次 -> 顯示「列表 | 圖表 | AI 教練」三大分頁
+  // 2. 單一場次詳情：列表 | 圖表 | AI 教練
   const pitchesReversed = [...activeSession.pitches].sort(
     (a, b) => b.pitchNumber - a.pitchNumber
   );
@@ -301,21 +349,16 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
     activeSession.pitches[0] ??
     null;
 
-  // 計算 AI 教練的 3 大優勢與 3 大重點改善
-  const avgSpeed =
-    activeSession.pitches.length > 0
-      ? activeSession.pitches.reduce((a, p) => a + p.speedKmh, 0) / activeSession.pitches.length
-      : 105;
   const avgVB =
     activeSession.pitches.length > 0
       ? activeSession.pitches.reduce((a, p) => a + p.verticalBreakCm, 0) /
         activeSession.pitches.length
-      : 52;
+      : 48;
   const avgHB =
     activeSession.pitches.length > 0
       ? activeSession.pitches.reduce((a, p) => a + p.horizontalBreakCm, 0) /
         activeSession.pitches.length
-      : 23;
+      : 22;
   const avgEff =
     activeSession.pitches.length > 0
       ? Math.round(
@@ -333,36 +376,37 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
 
   return (
     <div className="mx-auto max-w-2xl pb-24 space-y-4">
-      {/* 頂部導覽列：< 2026/08/26 投球 ⓘ ⋮ */}
-      <div className="rounded-3xl bg-white text-slate-900 shadow-md border border-slate-200 overflow-hidden">
+      <div className="rounded-3xl bg-white text-slate-900 shadow-sm border border-slate-200 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3.5">
           <button
             type="button"
             onClick={() => onSelectSession(null)}
-            className="flex h-9 w-9 items-center justify-center rounded-full text--[#0b72b9] hover:bg-slate-100 transition text-xl font-bold text-[#0b72b9]"
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-slate-100 transition text-xl font-bold text-[#0b72b9]"
           >
             ‹
           </button>
 
-          <div className="flex items-center gap-1.5">
-            <h2 className="text-base font-extrabold text-[#0b72b9] underline decoration-dotted underline-offset-4">
-              {activeSession.title}
-            </h2>
-            <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-[#0b72b9] text-[11px] font-bold text-[#0b72b9]">
-              i
-            </span>
-          </div>
+          <h2 className="text-base font-extrabold text-[#0b72b9]">
+            {activeSession.title}
+          </h2>
 
           <button
             type="button"
-            onClick={() => onStartNewRecording(activeSession.id)}
-            className="rounded-xl bg-sky-50 px-2.5 py-1 text-xs font-bold text-[#0b72b9] hover:bg-sky-100"
+            onClick={() => {
+              if (activeSession.pitches.length >= 2) {
+                setComparePitchIds([
+                  activeSession.pitches[0].id,
+                  activeSession.pitches[1].id,
+                ]);
+              }
+              setShowCompareModal(true);
+            }}
+            className="rounded-xl bg-sky-50 px-3 py-1.5 text-xs font-extrabold text-[#0b72b9] hover:bg-sky-100 border border-sky-200"
           >
-            ＋新增一球
+            ◇ 比較結果
           </button>
         </div>
 
-        {/* 列表 | 圖表 | AI 教練 分頁切換列 */}
         <div className="grid grid-cols-3 border-t border-slate-200 text-center text-sm font-bold">
           {(
             [
@@ -387,41 +431,29 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
         </div>
       </div>
 
-      {/* 子分頁 1：列表 (8 格數據卡片：V / VB / HB / E / SD / GD / AS / S) */}
+      {/* 子分頁 1：列表 (左側球號/時間/球種/3D彩帶縮圖/九宮格落點 + 右側 2x4 八格數據) */}
       {activeSubTab === 'list' && (
         <div className="space-y-3.5">
           {pitchesReversed.map((p) => (
             <div
               key={p.id}
               onClick={() => onOpenPitchPlayer(activeSession.id, p.id)}
-              className="cursor-pointer rounded-3xl bg-white p-4 text-slate-900 shadow-md border border-slate-200 hover:border-sky-400 hover:shadow-lg transition space-y-3"
+              className="cursor-pointer rounded-3xl bg-white p-4 text-slate-900 shadow-sm border border-slate-200 hover:border-sky-400 hover:shadow-md transition space-y-3"
             >
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span className="font-mono">{p.timestamp}</span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeletePitch(activeSession.id, p.id);
-                  }}
-                  className="rounded-lg p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition"
-                  title="刪除此球"
-                >
-                  🗑
-                </button>
-              </div>
-
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-sky-100 text-xs">
-                    {p.isHitting ? '🏏' : '⚾'}
+                    ⚾
                   </span>
-                  <span className="text-base font-extrabold text-slate-900">
-                    {p.pitchNumber}. {p.isHitting ? '打擊' : '投球'}
-                  </span>
+                  <div>
+                    <div className="text-base font-extrabold text-slate-900">
+                      {p.pitchNumber}. 投球
+                    </div>
+                    <div className="text-[11px] font-mono text-slate-400">{p.timestamp}</div>
+                  </div>
                 </div>
 
-                <div onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                   <select
                     value={p.pitchType}
                     onChange={(e) =>
@@ -436,113 +468,84 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                       </option>
                     ))}
                   </select>
+
+                  <button
+                    type="button"
+                    onClick={() => onDeletePitch(activeSession.id, p.id)}
+                    className="rounded-lg p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition"
+                  >
+                    🗑
+                  </button>
                 </div>
               </div>
 
-              {/* SmartScout 經典 2x4 八格數據方塊 */}
-              <div className="grid grid-cols-4 gap-2 text-center">
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">V [km/h]</div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {p.speedKmh.toFixed(1)}
-                  </div>
-                </div>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                {/* 左側：3D 彩帶縮圖 + 九宮格落點縮圖 */}
+                <MiniRibbonAndZoneThumb pitch={p} />
 
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">
-                    {p.isHitting ? 'LA [°]' : 'VB [cm]'}
+                {/* 右側：2x4 八格完整數據 */}
+                <div className="flex-1 grid grid-cols-4 gap-1.5 text-center">
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">V [km/h]</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.speedKmh.toFixed(1)}
+                    </div>
                   </div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {(p.isHitting ? p.launchAngleDeg ?? p.verticalBreakCm : p.verticalBreakCm).toFixed(1)}
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">VB [cm]</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.verticalBreakCm.toFixed(1)}
+                    </div>
                   </div>
-                </div>
-
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">
-                    {p.isHitting ? 'SA [°]' : 'HB [cm]'}
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">HB [cm]</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.horizontalBreakCm.toFixed(1)}
+                    </div>
                   </div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {(p.isHitting ? p.sprayAngleDeg ?? p.horizontalBreakCm : p.horizontalBreakCm).toFixed(1)}
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">E [%]</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.efficiencyPct}
+                    </div>
                   </div>
-                </div>
-
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">E [%]</div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {p.efficiencyPct}
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">SD</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.spinDirection}
+                    </div>
                   </div>
-                </div>
-
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">SD</div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {p.spinDirection}
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">GD [°]</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.gyroDegree}
+                    </div>
                   </div>
-                </div>
-
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">GD [°]</div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {p.gyroDegree}
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">AS [rpm]</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.activeSpinRpm}
+                    </div>
                   </div>
-                </div>
-
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">AS [rpm]</div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {p.activeSpinRpm}
-                  </div>
-                </div>
-
-                <div className="rounded-xl bg-slate-100/90 py-2 px-1 border border-slate-200/80">
-                  <div className="text-[11px] text-slate-500">
-                    {p.isHitting ? 'DIST [m]' : 'S [rpm]'}
-                  </div>
-                  <div className="mt-0.5 text-base font-extrabold tabular-nums text-slate-900">
-                    {p.isHitting ? p.distanceM ?? 88 : p.totalSpinRpm}
+                  <div className="rounded-xl bg-slate-100/90 py-1.5 px-1 border border-slate-200/80">
+                    <div className="text-[10px] text-slate-500">S [rpm]</div>
+                    <div className="mt-0.5 text-sm font-extrabold tabular-nums text-slate-900">
+                      {p.totalSpinRpm}
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           ))}
-
-          {/* 底部懸浮按鈕：比較結果 + 錄製新球 */}
-          <div className="fixed bottom-18 inset-x-0 z-30 mx-auto flex max-w-md items-center gap-2.5 px-4">
-            <button
-              type="button"
-              onClick={() => {
-                if (activeSession.pitches.length >= 2) {
-                  setComparePitchIds([
-                    activeSession.pitches[0].id,
-                    activeSession.pitches[1].id,
-                  ]);
-                }
-                setShowCompareModal(true);
-              }}
-              className="flex-1 flex items-center justify-center gap-2 rounded-2xl bg-[#0b72b9] py-3.5 text-sm font-bold text-white shadow-xl hover:bg-[#0962a0] transition"
-            >
-              <span>◇</span>
-              <span>比較結果</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onStartNewRecording(activeSession.id)}
-              title="錄製或上傳新投球至此場次"
-              className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#0b72b9] text-white shadow-xl hover:bg-[#0962a0] transition text-lg"
-            >
-              📹
-            </button>
-          </div>
         </div>
       )}
 
-      {/* 子分頁 2：圖表 (投球變化量圖 -60~+60 cm & 九宮格進壘分布圖) */}
+      {/* 子分頁 2：圖表 (投球變化量圖 -60~+60 cm & 九宮格好球帶分布圖) */}
       {activeSubTab === 'chart' && (
-        <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-md border border-slate-200 space-y-4">
+        <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-lg font-extrabold text-slate-900">
-              {chartType === 'movement' ? '投球變化量圖' : '九宮格好球帶進壘分布圖'}
+              {chartType === 'movement' ? '投球變化量圖' : '九宮格好球帶分布圖'}
             </h3>
             <div className="flex rounded-xl bg-slate-100 p-1 text-xs font-bold">
               <button
@@ -565,16 +568,14 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                九宮格進壘點
+                九宮格好球帶分布圖
               </button>
             </div>
           </div>
 
           {chartType === 'movement' ? (
-            /* SmartScout 1:1 投球變化量圖 (-60 ~ +60 cm 象限方格) */
             <div className="mx-auto max-w-[360px]">
               <svg viewBox="0 0 340 340" className="w-full h-auto select-none">
-                {/* 縱軸標題：垂直變化量 [cm] */}
                 <text
                   x="16"
                   y="160"
@@ -586,8 +587,6 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                 >
                   垂直變化量 [cm]
                 </text>
-
-                {/* 橫軸標題：水平變化量 [cm] */}
                 <text
                   x="185"
                   y="332"
@@ -599,7 +598,6 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   水平變化量 [cm]
                 </text>
 
-                {/* 座標外框 (x: 55..315, y: 20..280, 中心 185, 150, 每 20cm = 37.14px) */}
                 <rect
                   x="55"
                   y="20"
@@ -610,7 +608,6 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   strokeWidth="1.5"
                 />
 
-                {/* 格線與刻度 (-60, -40, -20, 0, 20, 40, 60) */}
                 {[-60, -40, -20, 0, 20, 40, 60].map((val) => {
                   const px = 185 + (val / 70) * 130;
                   const py = 150 - (val / 70) * 130;
@@ -633,31 +630,16 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                         stroke={isZero ? '#94a3b8' : '#e2e8f0'}
                         strokeWidth={isZero ? '1.8' : '1'}
                       />
-                      {/* Y 軸刻度文字 */}
-                      <text
-                        x="47"
-                        y={py + 4}
-                        fill="#64748b"
-                        fontSize="11"
-                        textAnchor="end"
-                      >
+                      <text x="47" y={py + 4} fill="#64748b" fontSize="11" textAnchor="end">
                         {val}
                       </text>
-                      {/* X 軸刻度文字 */}
-                      <text
-                        x={px}
-                        y="298"
-                        fill="#64748b"
-                        fontSize="11"
-                        textAnchor="middle"
-                      >
+                      <text x={px} y="298" fill="#64748b" fontSize="11" textAnchor="middle">
                         {val}
                       </text>
                     </g>
                   );
                 })}
 
-                {/* 每一球的散佈圓點 */}
                 {activeSession.pitches.map((p) => {
                   const clampedHB = Math.max(-68, Math.min(68, p.horizontalBreakCm));
                   const clampedVB = Math.max(-68, Math.min(68, p.verticalBreakCm));
@@ -692,7 +674,7 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                         cy={cy}
                         r="6.5"
                         fill={color}
-                        fillOpacity="0.82"
+                        fillOpacity="0.85"
                         stroke={color}
                         strokeWidth="1.5"
                       />
@@ -702,10 +684,8 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
               </svg>
             </div>
           ) : (
-            /* 九宮格好球帶進壘點圖 */
             <div className="mx-auto max-w-[300px]">
               <svg viewBox="0 0 260 300" className="w-full h-auto select-none">
-                {/* 外圍追打區 */}
                 <rect
                   x="30"
                   y="20"
@@ -717,7 +697,6 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   strokeWidth="1.5"
                   strokeDasharray="4 4"
                 />
-                {/* 核心九宮格好球帶 (x: 65..195, y: 55..205) */}
                 <rect
                   x="65"
                   y="55"
@@ -727,13 +706,10 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   stroke="#334155"
                   strokeWidth="2.2"
                 />
-                {/* 九宮格內線 */}
                 <line x1="108.3" y1="55" x2="108.3" y2="205" stroke="#94a3b8" strokeWidth="1.2" />
                 <line x1="151.6" y1="55" x2="151.6" y2="205" stroke="#94a3b8" strokeWidth="1.2" />
                 <line x1="65" y1="105" x2="195" y2="105" stroke="#94a3b8" strokeWidth="1.2" />
                 <line x1="65" y1="155" x2="195" y2="155" stroke="#94a3b8" strokeWidth="1.2" />
-
-                {/* 五角形本壘板示意 */}
                 <polygon
                   points="65,255 195,255 195,270 130,290 65,270"
                   fill="#e2e8f0"
@@ -784,70 +760,52 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
           )}
 
           <p className="text-center text-xs text-slate-500">
-            👆 點按圓點查看詳情，再次點按前往紅色彩帶軌跡影片
+            👆 點按圓點查看完整數據預覽，再次點按前往影片分頁播放 3D 軌跡
           </p>
 
           {selectedChartPitch && (
             <div
               onClick={() => onOpenPitchPlayer(activeSession.id, selectedChartPitch.id)}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-sky-50 px-4 py-2.5 text-xs border border-sky-200 cursor-pointer hover:bg-sky-100 transition"
+              className="rounded-2xl bg-sky-50/90 p-3.5 text-xs border border-sky-200 cursor-pointer hover:bg-sky-100 transition space-y-2"
             >
-              <span className="font-bold text-slate-800">
-                #{selectedChartPitch.pitchNumber} {selectedChartPitch.pitchType} · 初速{' '}
-                <strong className="text-[#0b72b9]">{selectedChartPitch.speedKmh.toFixed(1)} km/h</strong>
-              </span>
-              <span className="text-slate-600">
-                VB {selectedChartPitch.verticalBreakCm.toFixed(1)}cm · HB{' '}
-                {selectedChartPitch.horizontalBreakCm.toFixed(1)}cm · {selectedChartPitch.totalSpinRpm} rpm
-              </span>
-              <span className="font-bold text-[#0b72b9]">開啟軌跡影片 ›</span>
+              <div className="flex items-center justify-between">
+                <span className="font-extrabold text-slate-900">
+                  #{selectedChartPitch.pitchNumber} {selectedChartPitch.pitchType}（進壘 #{selectedChartPitch.zoneId ?? 5}）
+                </span>
+                <span className="font-bold text-[#0b72b9]">再點一下播放 3D 軌跡影片 ›</span>
+              </div>
+              <div className="grid grid-cols-4 gap-1.5 text-center font-mono">
+                <div className="rounded-lg bg-white py-1 border border-slate-200">
+                  <div className="text-[10px] text-slate-400">V [km/h]</div>
+                  <div className="font-bold text-slate-900">{selectedChartPitch.speedKmh.toFixed(1)}</div>
+                </div>
+                <div className="rounded-lg bg-white py-1 border border-slate-200">
+                  <div className="text-[10px] text-slate-400">VB [cm]</div>
+                  <div className="font-bold text-slate-900">{selectedChartPitch.verticalBreakCm.toFixed(1)}</div>
+                </div>
+                <div className="rounded-lg bg-white py-1 border border-slate-200">
+                  <div className="text-[10px] text-slate-400">HB [cm]</div>
+                  <div className="font-bold text-slate-900">{selectedChartPitch.horizontalBreakCm.toFixed(1)}</div>
+                </div>
+                <div className="rounded-lg bg-white py-1 border border-slate-200">
+                  <div className="text-[10px] text-slate-400">S [rpm]</div>
+                  <div className="font-bold text-slate-900">{selectedChartPitch.totalSpinRpm}</div>
+                </div>
+              </div>
             </div>
           )}
-
-          {/* 球種平均值摘要表 */}
-          <div className="overflow-x-auto border-t border-slate-200 pt-3">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-slate-200 text-slate-600">
-                  <th className="py-2 pr-2">球種</th>
-                  <th className="py-2 px-2 text-right">平均球速 [km/h]</th>
-                  <th className="py-2 px-2 text-right">平均垂直變化量 [cm]</th>
-                  <th className="py-2 pl-2 text-right">平均水平變化量 [cm]</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 font-semibold">
-                {pitchTypeSummaries.map((s) => (
-                  <tr key={s.name}>
-                    <td className="py-2.5 pr-2 flex items-center gap-2">
-                      <span
-                        className="inline-block h-3 w-3 rounded-full"
-                        style={{ backgroundColor: s.color }}
-                      />
-                      <span>{s.name}</span>
-                    </td>
-                    <td className="py-2.5 px-2 text-right font-mono text-sm">{s.avgV.toFixed(1)}</td>
-                    <td className="py-2.5 px-2 text-right font-mono text-sm">{s.avgVB.toFixed(1)}</td>
-                    <td className="py-2.5 pl-2 text-right font-mono text-sm">{s.avgHB.toFixed(1)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </div>
       )}
 
-      {/* 子分頁 3：AI 教練 (簡潔清晰淺色卡片，無冗長文字) */}
+      {/* 子分頁 3：AI 教練 (100% 免費解鎖：球種特徵表 + 3 大優勢 & 3 大重點改善) */}
       {activeSubTab === 'ai_coach' && (
         <div className="space-y-4">
-          <div className="text-center py-1">
-            <h3 className="text-xl font-black text-slate-900">已分析您的投球</h3>
-          </div>
-
-          {/* 卡片 1：球種特徵 */}
           <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-3">
             <div className="flex items-center justify-between">
               <h4 className="text-base font-extrabold text-slate-900">球種特徵</h4>
-              <span className="text-xs font-bold text-[#0b72b9]">🔓</span>
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800">
+                🔓 100% 免費解鎖
+              </span>
             </div>
 
             <div className="overflow-x-auto rounded-2xl border border-slate-200">
@@ -855,9 +813,10 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                 <thead className="bg-slate-100 text-slate-600">
                   <tr>
                     <th className="py-2.5 px-3">球種</th>
-                    <th className="py-2.5 px-2 text-right">球速 [km/h]</th>
-                    <th className="py-2.5 px-2 text-right">垂直變化量 [cm]</th>
-                    <th className="py-2.5 px-3 text-right">水平變化量 [cm]</th>
+                    <th className="py-2.5 px-2 text-right">平均/最大球速</th>
+                    <th className="py-2.5 px-2 text-right">平均轉速 / 效率</th>
+                    <th className="py-2.5 px-2 text-right">垂直 VB</th>
+                    <th className="py-2.5 px-3 text-right">水平 HB</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 font-semibold">
@@ -870,9 +829,14 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                         />
                         <span>{s.name}</span>
                       </td>
-                      <td className="py-3 px-2 text-right font-mono text-sm">{s.avgV.toFixed(1)}</td>
-                      <td className="py-3 px-2 text-right font-mono text-sm">{s.avgVB.toFixed(1)}</td>
-                      <td className="py-3 px-3 text-right font-mono text-sm">{s.avgHB.toFixed(1)}</td>
+                      <td className="py-3 px-2 text-right font-mono">
+                        {s.avgV.toFixed(1)} / <strong>{s.maxV.toFixed(1)}</strong> km/h
+                      </td>
+                      <td className="py-3 px-2 text-right font-mono">
+                        {s.avgSpin} rpm ({s.avgEff}%)
+                      </td>
+                      <td className="py-3 px-2 text-right font-mono">{s.avgVB.toFixed(1)} cm</td>
+                      <td className="py-3 px-3 text-right font-mono">{s.avgHB.toFixed(1)} cm</td>
                     </tr>
                   ))}
                 </tbody>
@@ -880,52 +844,63 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
             </div>
           </div>
 
-          {/* 卡片 2：優勢與重點改善 (簡明標籤式，不放長篇文字) */}
           <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-3">
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-base font-extrabold text-slate-900">優勢與重點改善</h4>
-                <p className="text-xs text-slate-500">優勢 3 / 重點改善 3</p>
+                <p className="text-xs text-slate-500">3 大優勢 / 3 大重點改善（生物力學與配球建議）</p>
               </div>
               <span className="text-xs font-bold text-[#0b72b9]">🔓</span>
             </div>
 
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 text-xs font-bold">
-              <div className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-3.5 py-2.5 text-emerald-900 border border-emerald-200">
-                <span className="text-emerald-600">●</span>
-                <span>垂直上竄量優異 ({avgVB.toFixed(1)} cm)</span>
+              <div className="rounded-2xl bg-emerald-50 p-3 text-emerald-950 border border-emerald-200">
+                <div className="text-emerald-700">✓ 優勢 1：垂直上竄尾勁出色 ({avgVB.toFixed(1)} cm)</div>
+                <div className="mt-1 font-normal text-emerald-900/80">
+                  釋球瞬間背旋紮實，高角度進壘具極高揮空率。
+                </div>
               </div>
-              <div className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-3.5 py-2.5 text-emerald-900 border border-emerald-200">
-                <span className="text-emerald-600">●</span>
-                <span>轉速穩定 ({avgSpin} rpm · {avgEff}%)</span>
+              <div className="rounded-2xl bg-emerald-50 p-3 text-emerald-950 border border-emerald-200">
+                <div className="text-emerald-700">✓ 優勢 2：轉速與效率穩定 ({avgSpin} rpm · {avgEff}%)</div>
+                <div className="mt-1 font-normal text-emerald-900/80">
+                  指尖扣球能量傳遞穩定，有效轉速維持高檔。
+                </div>
               </div>
-              <div className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-3.5 py-2.5 text-emerald-900 border border-emerald-200">
-                <span className="text-emerald-600">●</span>
-                <span>橫向尾勁延伸 ({avgHB.toFixed(1)} cm)</span>
+              <div className="rounded-2xl bg-emerald-50 p-3 text-emerald-950 border border-emerald-200">
+                <div className="text-emerald-700">✓ 優勢 3：手臂側水平延伸 ({avgHB.toFixed(1)} cm)</div>
+                <div className="mt-1 font-normal text-emerald-900/80">
+                  自然橫向位移能有效擠壓打者內外角好球帶邊緣。
+                </div>
               </div>
-              <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-amber-900 border border-amber-200">
-                <span className="text-amber-600">▲</span>
-                <span>陀螺角可再收斂至 25° 內</span>
+              <div className="rounded-2xl bg-amber-50 p-3 text-amber-950 border border-amber-200">
+                <div className="text-amber-800">⚡ 重點改善 1：收斂陀螺角度提升純背旋比例</div>
+                <div className="mt-1 font-normal text-amber-900/80">
+                  食指與中指施力維持球心正後方，減少側向切球耗損。
+                </div>
               </div>
-              <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-amber-900 border border-amber-200">
-                <span className="text-amber-600">▲</span>
-                <span>固定放球軸向 (00:45~01:00)</span>
+              <div className="rounded-2xl bg-amber-50 p-3 text-amber-950 border border-amber-200">
+                <div className="text-amber-800">⚡ 重點改善 2：固定前導腳落地後之放球高度</div>
+                <div className="mt-1 font-normal text-amber-900/80">
+                  縮小連續投球間的旋轉軸時鐘角離散度，提升九宮格邊角控球。
+                </div>
               </div>
-              <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-amber-900 border border-amber-200">
-                <span className="text-amber-600">▲</span>
-                <span>搭配 12 km/h 速差變化球</span>
+              <div className="rounded-2xl bg-amber-50 p-3 text-amber-950 border border-amber-200">
+                <div className="text-amber-800">⚡ 重點改善 3：搭配 12~15 km/h 速差之共軌變化球</div>
+                <div className="mt-1 font-normal text-amber-900/80">
+                  以相同出手視窗搭配變速球或滑球，最大化打者視覺共軌混淆。
+                </div>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 「◇ 比較結果」彈跳視窗 */}
+      {/* 「◇ 比較結果」並排比對視窗（含差值 Δ） */}
       {showCompareModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
           <div className="w-full max-w-lg rounded-3xl bg-white p-5 text-slate-900 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-extrabold text-slate-900">◇ 投球數據並排比較</h3>
+              <h3 className="text-lg font-extrabold text-slate-900">◇ 兩球數據並排比對</h3>
               <button
                 type="button"
                 onClick={() => setShowCompareModal(false)}
@@ -947,6 +922,9 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                   activeSession.pitches.find((p) => p.id === idA) ?? activeSession.pitches[0];
                 const pB =
                   activeSession.pitches.find((p) => p.id === idB) ?? activeSession.pitches[1];
+
+                const fmtDelta = (val: number, unit = '') =>
+                  `${val >= 0 ? '+' : ''}${val.toFixed(1)}${unit}`;
 
                 return (
                   <div className="space-y-3">
@@ -983,48 +961,60 @@ export const SmartScoutSessionView: React.FC<SmartScoutSessionViewProps> = ({
                             <th className="py-2 px-2">#{pA.pitchNumber} {pA.pitchType}</th>
                             <th className="py-2 px-2">指標項目</th>
                             <th className="py-2 px-2">#{pB.pitchNumber} {pB.pitchType}</th>
+                            <th className="py-2 px-2">差值 Δ</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200 font-mono font-bold">
                           <tr>
-                            <td className="py-2 text-sm text-[#0b72b9]">{pA.speedKmh.toFixed(1)} km/h</td>
-                            <td className="py-2 font-sans text-slate-500">初速 V</td>
-                            <td className="py-2 text-sm text-rose-600">{pB.speedKmh.toFixed(1)} km/h</td>
+                            <td className="py-2 text-[#0b72b9]">{pA.speedKmh.toFixed(1)}</td>
+                            <td className="py-2 font-sans text-slate-500">初速 [km/h]</td>
+                            <td className="py-2 text-rose-600">{pB.speedKmh.toFixed(1)}</td>
+                            <td className="py-2 text-slate-700">
+                              {fmtDelta(pA.speedKmh - pB.speedKmh)}
+                            </td>
                           </tr>
                           <tr>
-                            <td className="py-2">{pA.verticalBreakCm.toFixed(1)} cm</td>
-                            <td className="py-2 font-sans text-slate-500">垂直變化量 VB</td>
-                            <td className="py-2">{pB.verticalBreakCm.toFixed(1)} cm</td>
+                            <td className="py-2">{pA.verticalBreakCm.toFixed(1)}</td>
+                            <td className="py-2 font-sans text-slate-500">垂直 VB [cm]</td>
+                            <td className="py-2">{pB.verticalBreakCm.toFixed(1)}</td>
+                            <td className="py-2 text-slate-700">
+                              {fmtDelta(pA.verticalBreakCm - pB.verticalBreakCm)}
+                            </td>
                           </tr>
                           <tr>
-                            <td className="py-2">{pA.horizontalBreakCm.toFixed(1)} cm</td>
-                            <td className="py-2 font-sans text-slate-500">水平變化量 HB</td>
-                            <td className="py-2">{pB.horizontalBreakCm.toFixed(1)} cm</td>
+                            <td className="py-2">{pA.horizontalBreakCm.toFixed(1)}</td>
+                            <td className="py-2 font-sans text-slate-500">水平 HB [cm]</td>
+                            <td className="py-2">{pB.horizontalBreakCm.toFixed(1)}</td>
+                            <td className="py-2 text-slate-700">
+                              {fmtDelta(pA.horizontalBreakCm - pB.horizontalBreakCm)}
+                            </td>
                           </tr>
                           <tr>
-                            <td className="py-2">{pA.totalSpinRpm} rpm</td>
-                            <td className="py-2 font-sans text-slate-500">總轉速 S</td>
-                            <td className="py-2">{pB.totalSpinRpm} rpm</td>
+                            <td className="py-2">{pA.totalSpinRpm}</td>
+                            <td className="py-2 font-sans text-slate-500">轉速 S [rpm]</td>
+                            <td className="py-2">{pB.totalSpinRpm}</td>
+                            <td className="py-2 text-slate-700">
+                              {pA.totalSpinRpm - pB.totalSpinRpm >= 0 ? '+' : ''}
+                              {pA.totalSpinRpm - pB.totalSpinRpm}
+                            </td>
                           </tr>
                           <tr>
-                            <td className="py-2">{pA.activeSpinRpm} rpm</td>
+                            <td className="py-2">{pA.activeSpinRpm}</td>
                             <td className="py-2 font-sans text-slate-500">有效轉速 AS</td>
-                            <td className="py-2">{pB.activeSpinRpm} rpm</td>
+                            <td className="py-2">{pB.activeSpinRpm}</td>
+                            <td className="py-2 text-slate-700">
+                              {pA.activeSpinRpm - pB.activeSpinRpm >= 0 ? '+' : ''}
+                              {pA.activeSpinRpm - pB.activeSpinRpm}
+                            </td>
                           </tr>
                           <tr>
                             <td className="py-2">{pA.efficiencyPct}%</td>
-                            <td className="py-2 font-sans text-slate-500">旋轉效率 E</td>
+                            <td className="py-2 font-sans text-slate-500">效率 E [%]</td>
                             <td className="py-2">{pB.efficiencyPct}%</td>
-                          </tr>
-                          <tr>
-                            <td className="py-2">{pA.spinDirection}</td>
-                            <td className="py-2 font-sans text-slate-500">旋轉方向 SD</td>
-                            <td className="py-2">{pB.spinDirection}</td>
-                          </tr>
-                          <tr>
-                            <td className="py-2">{pA.gyroDegree}°</td>
-                            <td className="py-2 font-sans text-slate-500">陀螺角度 GD</td>
-                            <td className="py-2">{pB.gyroDegree}°</td>
+                            <td className="py-2 text-slate-700">
+                              {pA.efficiencyPct - pB.efficiencyPct >= 0 ? '+' : ''}
+                              {pA.efficiencyPct - pB.efficiencyPct}%
+                            </td>
                           </tr>
                         </tbody>
                       </table>

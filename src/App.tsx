@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BallDetection,
+  BenchmarkDataset,
   WorkerInMessage,
   WorkerOutMessage,
 } from './types';
@@ -13,14 +14,20 @@ import {
   INITIAL_SMARTSCOUT_SESSIONS,
   SmartScoutPitchRecord,
   SmartScoutSession,
+  convertBenchmark100ToSession,
   getPitchTypeColor,
   speakPitchResult,
 } from './data/smartScoutDefaultSessions';
 
-const SMARTSCOUT_REAL_SESSIONS_KEY = 'smartscout_real_sessions_v1';
+const SMARTSCOUT_SESSIONS_KEY = 'smartscout_sessions_v2';
+const LEGACY_TEMPLATE_IDS = new Set([
+  'session-2026-08-26-pitch',
+  'session-2026-08-26-hit',
+  'session-2026-08-19-pitch',
+  'session-ai-coach-demo',
+]);
 
 export function App() {
-  // 預設進入「追蹤」：一打開就直接開啟相機自動測速
   const [navTab, setNavTab] = useState<'track' | 'sessions' | 'video' | 'player' | 'settings'>(
     'track'
   );
@@ -34,13 +41,12 @@ export function App() {
 
   const [sessions, setSessions] = useState<SmartScoutSession[]>(() => {
     try {
-      // 清除舊版預載範例快取
-      window.localStorage.removeItem('smartscout_sessions_v1');
-      window.localStorage.removeItem('smartscout_sessions_v2');
-      const saved = window.localStorage.getItem(SMARTSCOUT_REAL_SESSIONS_KEY);
+      const saved = window.localStorage.getItem(SMARTSCOUT_SESSIONS_KEY);
       if (saved) {
         const parsed = JSON.parse(saved) as SmartScoutSession[];
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) {
+          return parsed.filter((s) => !LEGACY_TEMPLATE_IDS.has(s.id));
+        }
       }
     } catch {
       // ignore
@@ -74,9 +80,28 @@ export function App() {
     forceUpdateModel,
   } = useModelCache(modelUrl, workerStatus);
 
+  // 自動載入 100 球基準測試庫 (benchmark_100.json) 供「場次」分頁瀏覽
+  useEffect(() => {
+    const url = new URL('./data/benchmark_100.json', window.location.href).href;
+    fetch(url)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: BenchmarkDataset | null) => {
+        if (!data?.pitches?.length) return;
+        const benchSession = convertBenchmark100ToSession(data);
+        setSessions((prev) => {
+          if (prev.some((s) => s.id === benchSession.id)) return prev;
+          return [...prev, benchSession];
+        });
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     try {
-      window.localStorage.setItem(SMARTSCOUT_REAL_SESSIONS_KEY, JSON.stringify(sessions));
+      const toStore = sessions.filter(
+        (s) => s.id !== 'session-benchmark-100' && !LEGACY_TEMPLATE_IDS.has(s.id)
+      );
+      window.localStorage.setItem(SMARTSCOUT_SESSIONS_KEY, JSON.stringify(toStore));
     } catch {
       // ignore
     }
@@ -135,7 +160,6 @@ export function App() {
     []
   );
 
-  // 相機或影片真實測得新球時自動寫入今日場次並語音播報
   const handleNewMeasuredPitch = useCallback(
     (newPitchData: Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'>) => {
       const now = new Date();
@@ -144,11 +168,15 @@ export function App() {
       const timeStr = `${dateStr} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
       const pitchId = `p-${Date.now()}`;
 
-      let targetSessId = selectedSessionId ?? sessions[0]?.id ?? '';
+      let targetSessId =
+        selectedSessionId && selectedSessionId !== 'session-benchmark-100'
+          ? selectedSessionId
+          : sessions.find((s) => s.id !== 'session-benchmark-100')?.id ?? '';
       let createdRecord: SmartScoutPitchRecord | null = null;
 
       setSessions((prev) => {
-        if (prev.length === 0 || !targetSessId) {
+        const userSessions = prev.filter((s) => s.id !== 'session-benchmark-100');
+        if (userSessions.length === 0 || !targetSessId) {
           targetSessId = `session-${Date.now()}`;
           const record: SmartScoutPitchRecord = {
             ...newPitchData,
@@ -166,14 +194,11 @@ export function App() {
             cameraSetup: cameraAngle,
             pitches: [record],
           };
-          return [newSess];
+          return [newSess, ...prev];
         }
 
-        return prev.map((s, idx) => {
-          if (s.id !== targetSessId && !(idx === 0 && !prev.some((x) => x.id === targetSessId))) {
-            return s;
-          }
-          targetSessId = s.id;
+        return prev.map((s) => {
+          if (s.id !== targetSessId) return s;
           const nextNum = s.pitches.reduce((m, p) => Math.max(m, p.pitchNumber), 0) + 1;
           const record: SmartScoutPitchRecord = {
             ...newPitchData,
@@ -200,8 +225,26 @@ export function App() {
     [cameraAngle, discipline, selectedSessionId, sessions, voiceEnabled]
   );
 
+  // 相機頁面僅顯示使用者當次實測到的最新球，不預載舊模板球
+  const activeUserSession =
+    sessions.find(
+      (s) => s.id === activePlayerPitch?.sessionId && s.id !== 'session-benchmark-100'
+    ) ??
+    sessions.find((s) => s.id !== 'session-benchmark-100') ??
+    null;
+
+  const liveMeasuredPitch =
+    activeUserSession && activeUserSession.pitches.length > 0
+      ? activeUserSession.pitches.find((p) => p.id === activePlayerPitch?.pitchId) ??
+        activeUserSession.pitches[activeUserSession.pitches.length - 1]
+      : null;
+
+  // 「影片」分頁可回放使用者實測球或從「場次」點選的 100 球基準庫
   const currentVideoSession =
-    sessions.find((s) => s.id === activePlayerPitch?.sessionId) ?? sessions[0] ?? null;
+    sessions.find((s) => s.id === activePlayerPitch?.sessionId) ??
+    activeUserSession ??
+    sessions[0] ??
+    null;
   const currentVideoPitchIdx = currentVideoSession
     ? Math.max(
         0,
@@ -222,7 +265,7 @@ export function App() {
             ? { ...s, pitches: s.pitches.filter((p) => p.id !== pitchId) }
             : s
         )
-        .filter((s) => s.pitches.length > 0)
+        .filter((s) => s.pitches.length > 0 || s.id === 'session-benchmark-100')
     );
   }, []);
 
@@ -253,10 +296,10 @@ export function App() {
       }`}
     >
       <main className="mx-auto max-w-2xl px-0 sm:px-4 sm:pt-3">
-        {/* 1. 追蹤：直接開啟真實相機自動測速 (無任何預載影片或假數據) */}
+        {/* 分頁 1：追蹤 (SmartScoutLiveCamera) */}
         {navTab === 'track' && (
           <SmartScoutLiveCamera
-            currentPitch={currentVideoPitch}
+            currentPitch={liveMeasuredPitch}
             cameraAngle={cameraAngle}
             discipline={discipline}
             distanceMeters={distanceMeters}
@@ -265,21 +308,21 @@ export function App() {
             latestBall={latestBall}
             onBackToSession={() => setNavTab('sessions')}
             onDeletePitch={(pitchId) => {
-              if (currentVideoSession) {
-                handleDeletePitch(currentVideoSession.id, pitchId);
+              if (activeUserSession) {
+                handleDeletePitch(activeUserSession.id, pitchId);
               }
             }}
             onFrame={handleFrame}
             onNewMeasuredPitch={handleNewMeasuredPitch}
             onChangePitchType={(pitchId, newType) => {
-              if (currentVideoSession) {
-                handleChangePitchType(currentVideoSession.id, pitchId, newType);
+              if (activeUserSession) {
+                handleChangePitchType(activeUserSession.id, pitchId, newType);
               }
             }}
           />
         )}
 
-        {/* 2. 場次：僅顯示真實測得之投球紀錄 */}
+        {/* 分頁 2：場次 (SmartScoutSessionView) */}
         {navTab === 'sessions' && (
           <div className="px-3 pt-3 sm:px-0">
             <SmartScoutSessionView
@@ -301,7 +344,7 @@ export function App() {
           </div>
         )}
 
-        {/* 3. 影片：回放真實測得之投球與 3D 紅色彩帶 */}
+        {/* 分頁 3：影片 (SmartScoutPitchPlayer) */}
         {navTab === 'video' && (
           <SmartScoutPitchPlayer
             pitch={currentVideoPitch}
@@ -340,14 +383,14 @@ export function App() {
           />
         )}
 
-        {/* 4. 球員：個人檔案 */}
+        {/* 分頁 4：球員 (SmartScoutPlayerProfile) */}
         {navTab === 'player' && (
           <div className="px-3 pt-3 sm:px-0">
             <SmartScoutPlayerProfile sessions={sessions} />
           </div>
         )}
 
-        {/* 5. 設定：極簡淺色設定列表 */}
+        {/* 分頁 5：設定 */}
         {navTab === 'settings' && (
           <div className="mx-auto max-w-md px-3 pt-3 sm:px-0 space-y-3">
             <div className="rounded-3xl bg-white p-5 text-slate-900 shadow-sm border border-slate-200 space-y-4">
@@ -443,7 +486,7 @@ export function App() {
                     }`}
                   />
                   <span className="font-bold text-slate-700">
-                    AI 引擎 ({backend || 'ONNX'})
+                    ONNX AI 引擎 ({backend || 'WASM'})
                     {inferTimeMs > 0 ? ` · ${inferTimeMs}ms` : ''}
                   </span>
                   {isModelCached && (
@@ -459,7 +502,7 @@ export function App() {
                   onClick={forceUpdateModel}
                   className="rounded-xl bg-slate-100 px-3 py-1.5 font-bold text-[#0b72b9] hover:bg-slate-200 disabled:opacity-40"
                 >
-                  {isUpdatingModel ? '更新中' : '更新模型'}
+                  {isUpdatingModel ? '更新中' : '強制更新模型'}
                 </button>
               </div>
             </div>
@@ -467,7 +510,7 @@ export function App() {
         )}
       </main>
 
-      {/* SmartScout 底部 5 大導覽列 */}
+      {/* 五大底部導覽分頁：追蹤 | 場次 | 影片 | 球員 | 設定 */}
       <nav
         className={`fixed bottom-0 inset-x-0 z-40 border-t backdrop-blur-md shadow-[0_-4px_16px_rgba(0,0,0,0.06)] ${
           lightMode
