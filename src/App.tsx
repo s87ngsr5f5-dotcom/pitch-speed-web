@@ -291,13 +291,16 @@ export function App() {
             currentPitch={currentVideoPitch}
             cameraAngle={cameraAngle}
             discipline={discipline}
-            voiceEnabled={voiceEnabled}
             isWorkerReady={workerStatus === 'ready'}
             isBusyRef={isBusyRef}
             latestBall={latestBall}
-            onChangeCameraAngle={setCameraAngle}
-            onChangeDiscipline={setDiscipline}
-            onToggleVoice={() => setVoiceEnabled((v) => !v)}
+            onBackToSession={() => {
+              setSelectedSessionId(currentVideoSession.id);
+              setNavTab('sessions');
+            }}
+            onDeletePitch={(pitchId) =>
+              handleDeletePitch(currentVideoSession.id, pitchId)
+            }
             onFrame={handleFrame}
             onNewMeasuredPitch={handleNewMeasuredPitch}
             onChangePitchType={(pitchId, newType) =>
