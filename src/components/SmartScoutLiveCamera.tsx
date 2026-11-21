@@ -358,6 +358,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !uploadedVideoUrl || !isWorkerReady || discipline !== 'pitching') return;
+    // 以 0.25x 慢速解碼上傳影片，確保瀏覽器 WASM Worker 逐幀推論不跳幀、與全幀基準測速一致
+    video.playbackRate = 0.25;
     void video.play().catch((error: DOMException) => {
       if (error.name !== 'AbortError') {
         setCaptureMessage('無法自動播放。請按「播放並分析」。');
@@ -553,7 +555,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     detectedInFileRef.current = 0;
     setCaptureMessage('');
     if (video.readyState >= 1) video.currentTime = 0;
-    video.playbackRate = 0.5;
+    video.playbackRate = 0.25;
     void video.play().catch(() => setCaptureMessage(
       '無法播放這部影片。請試用 H.264 編碼的 MP4。'
     ));
@@ -944,9 +946,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             pointerEvents="none"
           />
         )}
-        {!calibrating && currentPitch?.measurement?.automaticEndpoints && [
-          { x: currentPitch.ribbonPath.startX, y: currentPitch.ribbonPath.startY, label: '推估出手' },
-          { x: currentPitch.ribbonPath.endX, y: currentPitch.ribbonPath.endY, label: '推估接球' },
+        {!calibrating && displayPitch?.measurement?.automaticEndpoints && [
+          { x: displayPitch.ribbonPath.startX, y: displayPitch.ribbonPath.startY, label: '推估出手' },
+          { x: displayPitch.ribbonPath.endX, y: displayPitch.ribbonPath.endY, label: '推估接球' },
         ].map(({ x, y, label }) => (
           <g key={label} transform={`translate(${x * stageW}, ${y * stageH})`}>
             <circle r={6} fill="#38bdf8" stroke="white" strokeWidth={2} />
@@ -954,7 +956,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
               paintOrder="stroke">{label}</text>
           </g>
         ))}
-        {!calibrating && showRibbon && currentPitch && ribbonSamples.length >= 2 && (
+        {!calibrating && showRibbon && displayPitch && ribbonSamples.length >= 2 && (
           <g filter="url(#liveRibbonShadow)">
             <polygon points={polygonPoints} fill="url(#liveRibbonGrad)" />
             {ribbonSamples.map((s, idx) => (
@@ -1008,7 +1010,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           </g>
         )}
 
-        {liveTrackDots.map((d, i) => (
+        {!displayPitch && liveTrackDots.map((d, i) => (
           <circle
             key={i}
             cx={(d.x / vw) * stageW}

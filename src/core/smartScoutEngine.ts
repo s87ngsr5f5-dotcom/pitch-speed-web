@@ -115,55 +115,58 @@ export function estimateAutomaticPitchFlight({
     }
   }
 
-  // Browser real-time frame-drop resilient fallback for 3D depth-perspective tracks:
+  // Segment-aware multi-angle & frame-drop resilient fallback:
+  // Splits detections into contiguous valid segments (handles multi-pitch clips) and
+  // supports both 3D depth-perspective angles (behind_pitcher / behind_catcher, sizeRatio >= 1.35)
+  // and oblique/side angles (large 2D lateral sweep span >= 0.14).
   if (detections.length >= 6) {
-    let s = 0;
-    let e = detections.length - 1;
-    while (s < e && depthStationary(s)) s++;
-    while (e > s && depthStationary(e - 1)) e--;
-    if (e - s >= 5) {
-      const firstDet = detections[s];
-      const lastDet = detections[e];
-      const startSize = Math.max(firstDet.width, firstDet.height);
-      const endSize = Math.max(lastDet.width, lastDet.height);
-      const sizeRatio = Math.max(startSize / Math.max(1, endSize), endSize / Math.max(1, startSize));
-      // Scale-invariant stop check: either a stationary catch frame was observed,
-      // or the ball has tapered across the full 3D tunnel (sizeRatio >= 1.50, independent of camera distance).
-      const hasEndStop = e < detections.length - 1 || sizeRatio >= 1.50;
-      const first = points[s];
-      const last = points[e];
-      const span = Math.hypot(last.x - first.x, last.y - first.y);
-      const releasePadMs = s === 0 && steps[s]?.dt > 45 ? 33.37 : 0;
-      const catchPadMs =
-        e === detections.length - 1 && steps[e - 1]?.dt > 45 && sizeRatio >= 1.55 ? 33.37 : 0;
-      const flightTimeMs = lastDet.timestampMs - firstDet.timestampMs - releasePadMs - catchPadMs;
-      const speedKmh = (distance * 3600) / flightTimeMs / 0.955;
-      let validSteps = true;
-      for (let k = s; k < e; k++) {
-        if (!steps[k]?.valid) {
-          validSteps = false;
-          break;
+    let segStart = 0;
+    for (let i = 0; i <= steps.length; i++) {
+      const isBreak = i === steps.length || !steps[i]?.valid;
+      if (!isBreak) continue;
+      const segEnd = i;
+      if (segEnd - segStart >= 5) {
+        let s = segStart;
+        let e = segEnd;
+        while (s < e && depthStationary(s)) s++;
+        while (e > s && depthStationary(e - 1)) e--;
+        if (e - s >= 5) {
+          const firstDet = detections[s];
+          const lastDet = detections[e];
+          const startSize = Math.max(firstDet.width, firstDet.height);
+          const endSize = Math.max(lastDet.width, lastDet.height);
+          const sizeRatio = Math.max(startSize / Math.max(1, endSize), endSize / Math.max(1, startSize));
+          const first = points[s];
+          const last = points[e];
+          const span = Math.hypot(last.x - first.x, last.y - first.y);
+          const hasEndStop = e < segEnd || sizeRatio >= 1.45;
+          const isDepthTrack = sizeRatio >= 1.35 && span >= 0.014;
+          const isObliqueTrack = sizeRatio >= 1.15 && span >= 0.14 && e < segEnd;
+          const releasePadMs = s === segStart && steps[s]?.dt > 45 ? 33.37 : 0;
+          const catchPadMs =
+            e === segEnd && steps[e - 1]?.dt > 45 && sizeRatio >= 1.50 ? 33.37 : 0;
+          const flightTimeMs = lastDet.timestampMs - firstDet.timestampMs - releasePadMs - catchPadMs;
+          const speedKmh = (distance * 3600) / flightTimeMs / 0.955;
+          if (
+            (isDepthTrack || isObliqueTrack) &&
+            hasEndStop &&
+            flightTimeMs >= 240 &&
+            flightTimeMs <= 920 &&
+            speedKmh >= 45 &&
+            speedKmh <= 185 &&
+            ![first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
+          ) {
+            const track = detections.slice(s, e + 1);
+            return {
+              track,
+              flightTimeMs: Number(flightTimeMs.toFixed(1)),
+              speedKmh: Number(speedKmh.toFixed(1)),
+              detectionCount: track.length,
+            };
+          }
         }
       }
-      if (
-        validSteps &&
-        hasEndStop &&
-        sizeRatio >= 1.42 &&
-        span >= 0.014 &&
-        flightTimeMs >= 240 &&
-        flightTimeMs <= 920 &&
-        speedKmh >= 45 &&
-        speedKmh <= 185 &&
-        ![first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
-      ) {
-        const track = detections.slice(s, e + 1);
-        return {
-          track,
-          flightTimeMs: Number(flightTimeMs.toFixed(1)),
-          speedKmh: Number(speedKmh.toFixed(1)),
-          detectionCount: track.length,
-        };
-      }
+      segStart = i + 1;
     }
   }
   return null;
