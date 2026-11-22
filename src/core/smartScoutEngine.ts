@@ -81,8 +81,8 @@ export function estimateAutomaticPitchFlight({
         ) continue;
         if (
           span < 0.014 ||
-          speedKmh < 35 ||
-          speedKmh > 195 ||
+          speedKmh < 40 ||
+          speedKmh > 158 ||
           [first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
         ) continue;
         let hasValidFlight = true;
@@ -98,7 +98,7 @@ export function estimateAutomaticPitchFlight({
       }
 
       if (stationary(start)) continue;
-      if (span < 0.065 || speedKmh < 35 || speedKmh > 195 ||
+      if (span < 0.065 || speedKmh < 40 || speedKmh > 158 ||
           [first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)) continue;
 
       const flight = steps.slice(start, end);
@@ -150,10 +150,10 @@ export function estimateAutomaticPitchFlight({
           if (
             (isDepthTrack || isObliqueTrack) &&
             hasEndStop &&
-            flightTimeMs >= 240 &&
+            flightTimeMs >= 320 &&
             flightTimeMs <= 920 &&
             speedKmh >= 45 &&
-            speedKmh <= 185 &&
+            speedKmh <= 158 &&
             ![first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
           ) {
             const track = detections.slice(s, e + 1);

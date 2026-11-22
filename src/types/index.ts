@@ -124,10 +124,13 @@ export interface BenchmarkDataset {
   pitches: BenchmarkPitchItem[];
 }
 
+export type PitchActionPhase = 'idle' | 'pitching_start' | 'pitching_end';
+
 export type WorkerInMessage =
   | {
       type: 'INIT';
       modelUrl: string;
+      actionModelUrl?: string;
       wasmPaths: string;
       inputSize?: number;
       confThreshold?: number;
@@ -141,6 +144,12 @@ export type WorkerInMessage =
     };
 
 export type WorkerOutMessage =
-  | { type: 'READY'; backend: string }
-  | { type: 'RESULT'; detection: BallDetection | null; inferTimeMs: number }
+  | { type: 'READY'; backend: string; actionModelReady?: boolean }
+  | {
+      type: 'RESULT';
+      detection: BallDetection | null;
+      inferTimeMs: number;
+      actionPhase?: PitchActionPhase;
+      actionConfidence?: number;
+    }
   | { type: 'ERROR'; message: string };

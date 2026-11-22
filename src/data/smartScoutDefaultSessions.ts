@@ -9,6 +9,8 @@ export interface SmartScoutPitchRecord {
   id: string;
   pitchNumber: number;
   timestamp: string;
+  recordedDate?: string;     // YYYY-MM-DD 實測日期
+  videoClipId?: string;      // IndexedDB 內儲存的單球影片 ID
   pitchType: string;
   pitchColor: string;
   cameraAngle: 'behind_pitcher' | 'behind_catcher';
@@ -159,6 +161,30 @@ export function speakPitchResult(pitch: SmartScoutPitchRecord, enabled: boolean)
   }
 }
 
+export function classifyPitchTypeFromTrajectory(params: {
+  speedKmh: number;
+  horizontalBreakCm: number;
+  verticalBreakCm: number;
+}): string {
+  const { speedKmh, horizontalBreakCm, verticalBreakCm } = params;
+  const absHb = Math.abs(horizontalBreakCm);
+
+  // 曲球：球速較慢且明顯下墜
+  if (speedKmh < 112 && verticalBreakCm <= -12) return '曲球';
+  // 滑球：橫向位移大且速度中等
+  if (absHb >= 16 && verticalBreakCm <= 14 && speedKmh < 132) return '滑球';
+  // 指叉球：中高球速但急劇下墜、橫向位移小
+  if (verticalBreakCm <= -10 && absHb < 12 && speedKmh >= 112) return '指叉球';
+  // 變速球：球速較慢、手臂側微幅偏移並伴隨下墜
+  if (speedKmh < 118 && horizontalBreakCm >= 8 && verticalBreakCm < 16) return '變速球';
+  // 伸卡球：高球速、手臂側位移明顯且縱向較低
+  if (speedKmh >= 118 && horizontalBreakCm >= 14 && verticalBreakCm < 24) return '伸卡球';
+  // 卡特球：高球速、手套側小幅切削
+  if (speedKmh >= 118 && horizontalBreakCm <= -10 && verticalBreakCm >= 8) return '卡特球';
+  // 預設四縫線快速球
+  return '四縫線快速球';
+}
+
 /** Create a record only when the track reaches both checkpoints. */
 export function computeRealPitchFromDetections(params: {
   detections: BallDetection[];
@@ -171,6 +197,7 @@ export function computeRealPitchFromDetections(params: {
   preferredPitchType?: string;
   snapshotUrl?: string;
   videoUrl?: string;
+  videoClipId?: string;
 }): Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'> | null {
   if (params.discipline !== 'pitching') return null;
   const automaticEndpoints = !params.checkpoints;
@@ -213,7 +240,14 @@ export function computeRealPitchFromDetections(params: {
   const pitchType =
     preferredPitchType && preferredPitchType !== '未標記'
       ? preferredPitchType
-      : '四縫線快速球';
+      : classifyPitchTypeFromTrajectory({
+          speedKmh,
+          horizontalBreakCm,
+          verticalBreakCm,
+        });
+
+  const now = new Date();
+  const recordedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
   const ctrlX = Math.max(0, Math.min(1, 2 * mid.x / videoWidth - (startX + endX) / 2));
   const ctrlY = Math.max(0, Math.min(1, 2 * mid.y / videoHeight - (startY + endY) / 2));
@@ -224,6 +258,8 @@ export function computeRealPitchFromDetections(params: {
   const radiusScale = Math.max(0.45, Math.min(1.0, normSpan / 0.12));
 
   return {
+    recordedDate,
+    videoClipId: params.videoClipId,
     pitchType,
     pitchColor: getPitchTypeColor(pitchType),
     cameraAngle,

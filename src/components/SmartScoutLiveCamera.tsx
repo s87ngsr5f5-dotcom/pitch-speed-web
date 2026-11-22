@@ -9,7 +9,8 @@ import {
   sampleQuadraticRibbon,
 } from '../data/smartScoutDefaultSessions';
 import { DEFAULT_TUNNEL_CONFIGS, MAX_PITCH_SAMPLE_GAP_MS } from '../core/smartScoutEngine';
-import { BallDetection, Point2D, TunnelBoxConfig } from '../types';
+import { BallDetection, PitchActionPhase, Point2D, TunnelBoxConfig } from '../types';
+import { savePitchVideoClip } from '../utils/pitchVideoStore';
 import { VideoFlightReview } from './VideoFlightReview';
 
 interface VideoFrameMetadata {
@@ -59,6 +60,8 @@ interface SmartScoutLiveCameraProps {
   workerError?: string;
   isBusyRef: React.MutableRefObject<boolean>;
   latestBall: BallDetection | null;
+  actionPhase?: PitchActionPhase;
+  actionConfidence?: number;
   onBackToSession: () => void;
   onDeletePitch: (pitchId: string) => void;
   onFrame: (
@@ -82,6 +85,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   workerError,
   isBusyRef,
   latestBall,
+  actionPhase = 'idle',
+  actionConfidence = 0,
   onBackToSession,
   onDeletePitch,
   onFrame,
@@ -89,6 +94,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   onChangePitchType,
 }) => {
   const videoRef = useRef<VideoWithRVFC | null>(null);
+  const clipChunksRef = useRef<Blob[]>([]);
+  const clipMimeRef = useRef<string>('video/webm');
+  const actionStartStreakRef = useRef<number>(0);
   const [hasLiveCamera, setHasLiveCamera] = useState<boolean>(false);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [selectedPitchType, setSelectedPitchType] = useState('未標記');
@@ -144,9 +152,19 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     if (!video || uploadedVideoUrl) return;
 
     let activeStream: MediaStream | null = null;
+    let recorder: MediaRecorder | null = null;
     let cancelled = false;
 
     const stopStream = () => {
+      if (recorder && recorder.state !== 'inactive') {
+        try {
+          recorder.stop();
+        } catch {
+          // ignore
+        }
+      }
+      recorder = null;
+      clipChunksRef.current = [];
       if (activeStream) {
         activeStream.getTracks().forEach((t) => t.stop());
         if (video.srcObject === activeStream) video.srcObject = null;
@@ -208,6 +226,34 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       try {
         await video.play();
         if (!cancelled) {
+          // 啟動 4 秒環形緩衝錄影，每球測完自動將該球影片存入 IndexedDB
+          if (typeof MediaRecorder !== 'undefined') {
+            try {
+              const preferredTypes = [
+                'video/mp4',
+                'video/webm;codecs=vp8',
+                'video/webm',
+              ];
+              const mimeType =
+                preferredTypes.find((t) => MediaRecorder.isTypeSupported?.(t)) ?? '';
+              clipMimeRef.current = mimeType || 'video/webm';
+              clipChunksRef.current = [];
+              recorder = mimeType
+                ? new MediaRecorder(activeStream, { mimeType })
+                : new MediaRecorder(activeStream);
+              recorder.ondataavailable = (ev) => {
+                if (ev.data && ev.data.size > 0) {
+                  clipChunksRef.current.push(ev.data);
+                  if (clipChunksRef.current.length > 5) {
+                    clipChunksRef.current.shift();
+                  }
+                }
+              };
+              recorder.start(900);
+            } catch {
+              recorder = null;
+            }
+          }
           setHasLiveCamera(true);
           setCaptureMessage('');
         }
@@ -383,6 +429,22 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     }
   }, []);
 
+  // 隨時感知投球動作：一開始投球立刻清除上一球軌跡、自動開始測速
+  useEffect(() => {
+    if (!hasLiveCamera || uploadedVideoUrl || !isWorkerReady) return;
+    if (actionPhase === 'pitching_start' && actionConfidence >= 0.55) {
+      actionStartStreakRef.current += 1;
+      if (actionStartStreakRef.current === 2) {
+        if (currentPitch) {
+          setDismissedPitchId(currentPitch.id);
+        }
+        resetTrack();
+      }
+    } else {
+      actionStartStreakRef.current = 0;
+    }
+  }, [actionConfidence, actionPhase, currentPitch, hasLiveCamera, isWorkerReady, resetTrack, uploadedVideoUrl]);
+
   useEffect(() => {
     if (!latestBall || !sentTimestampsRef.current.delete(latestBall.timestampMs)) return;
     const video = videoRef.current;
@@ -442,7 +504,28 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
     if (record) {
       if (uploadedVideoUrl) measuredInFileRef.current += 1;
-      onNewMeasuredPitch({ ...record, snapshotUrl: captureVideoSnapshot() });
+      let savedVideoUrl = record.videoUrl;
+      let savedVideoClipId: string | undefined;
+      if (!uploadedVideoUrl && clipChunksRef.current.length > 0) {
+        try {
+          const clipBlob = new Blob([...clipChunksRef.current], {
+            type: clipMimeRef.current,
+          });
+          if (clipBlob.size > 0) {
+            savedVideoClipId = `clip-${Date.now()}`;
+            savedVideoUrl = URL.createObjectURL(clipBlob);
+            void savePitchVideoClip(savedVideoClipId, clipBlob);
+          }
+        } catch {
+          // ignore clip save failure
+        }
+      }
+      onNewMeasuredPitch({
+        ...record,
+        snapshotUrl: captureVideoSnapshot(),
+        videoUrl: savedVideoUrl,
+        videoClipId: savedVideoClipId,
+      });
       setCaptureMessage('');
       resetTrack();
       setProgress(0.06);

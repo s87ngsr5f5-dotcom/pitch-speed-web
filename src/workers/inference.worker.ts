@@ -1,5 +1,5 @@
 import * as ort from 'onnxruntime-web/webgpu';
-import { BallDetection, WorkerInMessage, WorkerOutMessage } from '../types';
+import { BallDetection, PitchActionPhase, WorkerInMessage, WorkerOutMessage } from '../types';
 
 const workerScope = self as unknown as {
   postMessage: (msg: WorkerOutMessage) => void;
@@ -7,18 +7,39 @@ const workerScope = self as unknown as {
 };
 
 let session: ort.InferenceSession | null = null;
+let actionSession: ort.InferenceSession | null = null;
 let inputSize = 320;
+const ACTION_SIZE = 160;
+const ACTION_LABELS: PitchActionPhase[] = ['idle', 'pitching_end', 'pitching_start'];
 let confThreshold = 0.22;
 let preserveAspectRatio = false;
 let offscreenCanvas: OffscreenCanvas | null = null;
 let ctx: OffscreenCanvasRenderingContext2D | null = null;
 let inputBuffer: Float32Array | null = null;
+let actionCanvas: OffscreenCanvas | null = null;
+let actionCtx: OffscreenCanvasRenderingContext2D | null = null;
+let actionBuffer: Float32Array | null = null;
+
+async function fetchModelBytes(url: string): Promise<Uint8Array | null> {
+  try {
+    if ('caches' in self) {
+      const cached = await caches.match(url);
+      if (cached && cached.ok) return new Uint8Array(await cached.arrayBuffer());
+    }
+    const resp = await fetch(url);
+    if (resp.ok) return new Uint8Array(await resp.arrayBuffer());
+  } catch {
+    // Fall back to URL loading.
+  }
+  return null;
+}
 
 async function initModel(
   modelUrl: string,
   wasmPaths: string,
   size = 320,
-  threshold = 0.22
+  threshold = 0.22,
+  actionModelUrl?: string
 ) {
   inputSize = size;
   confThreshold = threshold;
@@ -29,24 +50,7 @@ async function initModel(
   ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
   inputBuffer = new Float32Array(3 * inputSize * inputSize);
 
-  let modelBytes: Uint8Array | null = null;
-  try {
-    if ('caches' in self) {
-      const cached = await caches.match(modelUrl);
-      if (cached && cached.ok) {
-        modelBytes = new Uint8Array(await cached.arrayBuffer());
-      }
-    }
-    if (!modelBytes) {
-      const resp = await fetch(modelUrl);
-      if (resp.ok) {
-        modelBytes = new Uint8Array(await resp.arrayBuffer());
-      }
-    }
-  } catch {
-    modelBytes = null;
-  }
-
+  const modelBytes = await fetchModelBytes(modelUrl);
   const createSession = (opts: ort.InferenceSession.SessionOptions) =>
     modelBytes
       ? ort.InferenceSession.create(modelBytes, opts)
@@ -77,7 +81,28 @@ async function initModel(
   }
   // Use the legacy stretch for COCO and training-style padding for the baseball model.
   preserveAspectRatio = output.shape[1] === 5;
-  workerScope.postMessage({ type: 'READY', backend: activeBackend });
+
+  // Optionally load the lightweight 160x160 pitching action trigger model.
+  let actionModelReady = false;
+  if (actionModelUrl) {
+    try {
+      const actionBytes = await fetchModelBytes(actionModelUrl);
+      if (actionBytes) {
+        actionSession = await ort.InferenceSession.create(actionBytes, {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'basic',
+        });
+        actionCanvas = new OffscreenCanvas(ACTION_SIZE, ACTION_SIZE);
+        actionCtx = actionCanvas.getContext('2d', { willReadFrequently: true });
+        actionBuffer = new Float32Array(3 * ACTION_SIZE * ACTION_SIZE);
+        actionModelReady = true;
+      }
+    } catch {
+      actionSession = null;
+    }
+  }
+
+  workerScope.postMessage({ type: 'READY', backend: activeBackend, actionModelReady });
 }
 
 function preprocess(bitmap: ImageBitmap) {
@@ -160,11 +185,56 @@ function parseBestBall(
   };
 }
 
+async function inferActionPhase(
+  bitmap: ImageBitmap
+): Promise<{ actionPhase: PitchActionPhase; actionConfidence: number } | null> {
+  if (!actionSession || !actionCtx || !actionBuffer) return null;
+  try {
+    const scale = Math.min(ACTION_SIZE / bitmap.width, ACTION_SIZE / bitmap.height);
+    const dw = Math.max(1, Math.round(bitmap.width * scale));
+    const dh = Math.max(1, Math.round(bitmap.height * scale));
+    const px = Math.floor((ACTION_SIZE - dw) / 2);
+    const py = Math.floor((ACTION_SIZE - dh) / 2);
+    actionCtx.fillStyle = 'rgb(114,114,114)';
+    actionCtx.fillRect(0, 0, ACTION_SIZE, ACTION_SIZE);
+    actionCtx.drawImage(bitmap, px, py, dw, dh);
+    const { data } = actionCtx.getImageData(0, 0, ACTION_SIZE, ACTION_SIZE);
+    const area = ACTION_SIZE * ACTION_SIZE;
+    const inv255 = 1 / 255;
+    for (let i = 0; i < area; i++) {
+      const idx = i * 4;
+      actionBuffer[i] = data[idx] * inv255;
+      actionBuffer[i + area] = data[idx + 1] * inv255;
+      actionBuffer[i + 2 * area] = data[idx + 2] * inv255;
+    }
+    const tensor = new ort.Tensor('float32', actionBuffer, [1, 3, ACTION_SIZE, ACTION_SIZE]);
+    const out = await actionSession.run({ [actionSession.inputNames[0]]: tensor });
+    const probs = out[actionSession.outputNames[0]].data as Float32Array;
+    let bestIdx = 0;
+    let bestProb = probs[0] ?? 0;
+    for (let i = 1; i < Math.min(ACTION_LABELS.length, probs.length); i++) {
+      if (probs[i] > bestProb) {
+        bestProb = probs[i];
+        bestIdx = i;
+      }
+    }
+    return { actionPhase: ACTION_LABELS[bestIdx], actionConfidence: bestProb };
+  } catch {
+    return null;
+  }
+}
+
 workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
   const msg = event.data;
   try {
     if (msg.type === 'INIT') {
-      await initModel(msg.modelUrl, msg.wasmPaths, msg.inputSize, msg.confThreshold);
+      await initModel(
+        msg.modelUrl,
+        msg.wasmPaths,
+        msg.inputSize,
+        msg.confThreshold,
+        msg.actionModelUrl,
+      );
     } else if (msg.type === 'INFER') {
       const start = performance.now();
       try {
@@ -178,10 +248,13 @@ workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
           msg.timestampMs,
           frame,
         );
+        const action = await inferActionPhase(msg.bitmap);
         workerScope.postMessage({
           type: 'RESULT',
           detection,
           inferTimeMs: Number((performance.now() - start).toFixed(1)),
+          actionPhase: action?.actionPhase,
+          actionConfidence: action?.actionConfidence,
         });
       } finally {
         msg.bitmap.close();

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BallDetection,
+  PitchActionPhase,
   WorkerInMessage,
   WorkerOutMessage,
 } from './types';
+import { deletePitchVideoClip, loadPitchVideoUrl } from './utils/pitchVideoStore';
 import { useModelCache } from './hooks/useModelCache';
 import { SmartScoutLiveCamera } from './components/SmartScoutLiveCamera';
 import { SmartScoutPitchPlayer } from './components/SmartScoutPitchPlayer';
@@ -64,12 +66,18 @@ export function App() {
   const [backend, setBackend] = useState<string>('');
   const [inferTimeMs, setInferTimeMs] = useState<number>(0);
   const [latestBall, setLatestBall] = useState<BallDetection | null>(null);
+  const [actionPhase, setActionPhase] = useState<PitchActionPhase>('idle');
+  const [actionConfidence, setActionConfidence] = useState<number>(0);
 
   const workerRef = useRef<Worker | null>(null);
   const isBusyRef = useRef<boolean>(false);
 
   const modelUrl = useMemo(
     () => new URL('./models/ball_yolo11n.onnx', window.location.href).href,
+    []
+  );
+  const actionModelUrl = useMemo(
+    () => new URL('./models/pitch_action_cls.onnx', window.location.href).href,
     []
   );
   const {
@@ -82,11 +90,48 @@ export function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(SMARTSCOUT_SESSIONS_KEY, JSON.stringify(sessions));
+      // Strip transient blob: URLs before persisting to localStorage; videoClipId restores them from IndexedDB.
+      const serializable = sessions.map((s) => ({
+        ...s,
+        pitches: s.pitches.map((p) =>
+          p.videoUrl?.startsWith('blob:') ? { ...p, videoUrl: undefined } : p
+        ),
+      }));
+      window.localStorage.setItem(SMARTSCOUT_SESSIONS_KEY, JSON.stringify(serializable));
     } catch {
       // ignore
     }
   }, [sessions]);
+
+  // 從 IndexedDB 還原已儲存的各球投球影片
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const updates = new Map<string, string>();
+      for (const s of sessions) {
+        for (const p of s.pitches) {
+          if (p.videoClipId && !p.videoUrl) {
+            const url = await loadPitchVideoUrl(p.videoClipId);
+            if (url) updates.set(p.id, url);
+          }
+        }
+      }
+      if (!cancelled && updates.size > 0) {
+        setSessions((prev) =>
+          prev.map((s) => ({
+            ...s,
+            pitches: s.pitches.map((p) =>
+              updates.has(p.id) ? { ...p, videoUrl: updates.get(p.id) } : p
+            ),
+          }))
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 初始化 ONNX Web Worker (320x320)
   useEffect(() => {
@@ -112,6 +157,10 @@ export function App() {
         isBusyRef.current = false;
         setInferTimeMs(msg.inferTimeMs);
         setLatestBall(msg.detection);
+        if (msg.actionPhase) {
+          setActionPhase(msg.actionPhase);
+          setActionConfidence(msg.actionConfidence ?? 0);
+        }
       } else if (msg.type === 'ERROR') {
         fail(msg.message);
       }
@@ -120,6 +169,7 @@ export function App() {
     const initMsg: WorkerInMessage = {
       type: 'INIT',
       modelUrl,
+      actionModelUrl,
       wasmPaths: new URL('./wasm/', window.location.href).href,
       inputSize: 320,
       confThreshold: 0.22,
@@ -130,7 +180,7 @@ export function App() {
       worker.terminate();
       workerRef.current = null;
     };
-  }, [modelUrl]);
+  }, [modelUrl, actionModelUrl]);
 
   const handleFrame = useCallback(
     (bitmap: ImageBitmap, timestampMs: number, origWidth: number, origHeight: number) => {
@@ -164,7 +214,8 @@ export function App() {
       const timeStr = `${dateStr} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
       const pitchId = `p-${Date.now()}`;
 
-      let targetSessId = sessions.find((s) => s.id === selectedSessionId)?.id ?? sessions[0]?.id ?? '';
+      let targetSessId =
+        sessions.find((s) => s.date === dateStr && s.discipline === discipline)?.id ?? '';
       let createdRecord: SmartScoutPitchRecord | null = null;
 
       setSessions((prev) => {
@@ -249,11 +300,14 @@ export function App() {
   const handleDeletePitch = useCallback((sessionId: string, pitchId: string) => {
     setSessions((prev) =>
       prev
-        .map((s) =>
-          s.id === sessionId
-            ? { ...s, pitches: s.pitches.filter((p) => p.id !== pitchId) }
-            : s
-        )
+        .map((s) => {
+          if (s.id !== sessionId) return s;
+          const target = s.pitches.find((p) => p.id === pitchId);
+          if (target?.videoClipId) {
+            void deletePitchVideoClip(target.videoClipId);
+          }
+          return { ...s, pitches: s.pitches.filter((p) => p.id !== pitchId) };
+        })
         .filter((s) => s.pitches.length > 0)
     );
   }, []);
@@ -296,6 +350,8 @@ export function App() {
             workerError={workerError}
             isBusyRef={isBusyRef}
             latestBall={latestBall}
+            actionPhase={actionPhase}
+            actionConfidence={actionConfidence}
             onBackToSession={() => setNavTab('sessions')}
             onDeletePitch={(pitchId) => {
               if (activeUserSession) {
