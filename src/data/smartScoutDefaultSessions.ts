@@ -185,6 +185,39 @@ export function classifyPitchTypeFromTrajectory(params: {
   return '四縫線快速球';
 }
 
+/**
+ * Filter out single-frame jump outliers from a pitch trajectory and return smoothed
+ * start/mid/end points so the 3D red ribbon hugs the true ball flight arc.
+ */
+export function cleanAndSmoothTrajectory(
+  track: BallDetection[],
+  videoWidth: number
+): BallDetection[] {
+  if (track.length < 4) return track;
+  const maxStepJump = Math.max(24, videoWidth * 0.16);
+  const cleaned: BallDetection[] = [track[0]];
+  for (let i = 1; i < track.length - 1; i++) {
+    const prev = cleaned[cleaned.length - 1];
+    const curr = track[i];
+    const next = track[i + 1];
+    const dtTotal = Math.max(1, next.timestampMs - prev.timestampMs);
+    const alpha = (curr.timestampMs - prev.timestampMs) / dtTotal;
+    const interpX = prev.x + (next.x - prev.x) * alpha;
+    const interpY = prev.y + (next.y - prev.y) * alpha;
+    const dev = Math.hypot(curr.x - interpX, curr.y - interpY);
+    const step = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+    if (dev <= maxStepJump * 0.65 && step <= maxStepJump) {
+      cleaned.push(curr);
+    }
+  }
+  const last = track[track.length - 1];
+  const prevLast = cleaned[cleaned.length - 1];
+  if (Math.hypot(last.x - prevLast.x, last.y - prevLast.y) <= maxStepJump) {
+    cleaned.push(last);
+  }
+  return cleaned.length >= 4 ? cleaned : track;
+}
+
 /** Create a record only when the track reaches both checkpoints. */
 export function computeRealPitchFromDetections(params: {
   detections: BallDetection[];
@@ -205,10 +238,16 @@ export function computeRealPitchFromDetections(params: {
   if (!result) return null;
 
   const { videoWidth, videoHeight, cameraAngle, preferredPitchType, snapshotUrl, videoUrl } = params;
-  const { track, speedKmh, flightTimeMs, detectionCount } = result;
+  const { track: rawTrack, speedKmh, flightTimeMs, detectionCount } = result;
+  const track = cleanAndSmoothTrajectory(rawTrack, videoWidth);
   const first = track[0];
   const last = track[track.length - 1];
-  const mid = track[Math.floor(track.length / 2)];
+  const midIdx = Math.floor(track.length / 2);
+  const midWindow = track.slice(Math.max(0, midIdx - 1), Math.min(track.length, midIdx + 2));
+  const mid = {
+    x: midWindow.reduce((s, p) => s + p.x, 0) / midWindow.length,
+    y: midWindow.reduce((s, p) => s + p.y, 0) / midWindow.length,
+  };
   const startX = first.x / videoWidth;
   const startY = first.y / videoHeight;
   const endX = last.x / videoWidth;

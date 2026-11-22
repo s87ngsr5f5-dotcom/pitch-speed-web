@@ -4,6 +4,7 @@ import {
   SMARTSCOUT_PITCH_TYPES,
   SmartScoutPitchRecord,
   buildTaperedRibbonPolygon,
+  cleanAndSmoothTrajectory,
   computeRealPitchFromDetections,
   getPitchTypeColor,
   sampleQuadraticRibbon,
@@ -52,11 +53,17 @@ function buildAutoPitchFallback(params: {
   preferredPitchType: string;
   videoUrl?: string;
 }): Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'> | null {
-  const { track, videoWidth, videoHeight, cameraAngle, distanceMeters, preferredPitchType, videoUrl } = params;
+  const { track: rawTrack, videoWidth, videoHeight, cameraAngle, distanceMeters, preferredPitchType, videoUrl } = params;
+  const track = cleanAndSmoothTrajectory(rawTrack, videoWidth);
   if (track.length < 5) return null;
   const first = track[0];
   const last = track[track.length - 1];
-  const mid = track[Math.floor(track.length / 2)];
+  const midIdx = Math.floor(track.length / 2);
+  const midWindow = track.slice(Math.max(0, midIdx - 1), Math.min(track.length, midIdx + 2));
+  const mid = {
+    x: midWindow.reduce((s, p) => s + p.x, 0) / midWindow.length,
+    y: midWindow.reduce((s, p) => s + p.y, 0) / midWindow.length,
+  };
   const flightTimeMs = last.timestampMs - first.timestampMs;
   if (flightTimeMs < 380 || flightTimeMs > 850) return null;
   const effectiveDist = Math.max(5, distanceMeters - 1.75);
@@ -584,6 +591,11 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             tsMs - allDetections[allDetections.length - 1].timestampMs > MAX_PITCH_SAMPLE_GAP_MS
           ) {
             allDetections.length = 0;
+          }
+          // 單幀空間跳躍過大（> 22% 畫面寬度）視為背景雜訊，不納入軌跡
+          const prevDet = allDetections[allDetections.length - 1];
+          if (prevDet && Math.hypot(det.x - prevDet.x, det.y - prevDet.y) > video.videoWidth * 0.22) {
+            continue;
           }
           allDetections.push(det);
           detectedInFileRef.current = allDetections.length;
