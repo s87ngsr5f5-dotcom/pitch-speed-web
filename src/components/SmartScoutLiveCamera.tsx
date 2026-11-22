@@ -1213,15 +1213,40 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           </g>
         )}
 
-        {!displayPitch && liveTrackDots.map((d, i) => (
+        {!displayPitch && showRibbon && liveTrackDots.length >= 2 && (
+          <g filter="url(#liveRibbonShadow)">
+            <polyline
+              fill="none"
+              stroke="url(#liveRibbonGrad)"
+              strokeWidth="12"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              points={liveTrackDots
+                .map((d) => `${((d.x / vw) * stageW).toFixed(1)},${((d.y / vh) * stageH).toFixed(1)}`)
+                .join(' ')}
+            />
+            <polyline
+              fill="none"
+              stroke="#ffffff"
+              strokeOpacity="0.65"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              points={liveTrackDots
+                .map((d) => `${((d.x / vw) * stageW).toFixed(1)},${((d.y / vh) * stageH).toFixed(1)}`)
+                .join(' ')}
+            />
+          </g>
+        )}
+        {!displayPitch && showRibbon && liveTrackDots.map((d, i) => (
           <circle
             key={i}
             cx={(d.x / vw) * stageW}
             cy={(d.y / vh) * stageH}
-            r={8}
-            fill="#ef233c"
-            stroke="#ffffff"
-            strokeWidth="2"
+            r={i === liveTrackDots.length - 1 ? 10 : 6}
+            fill={i === liveTrackDots.length - 1 ? '#ffffff' : '#ef233c'}
+            stroke={i === liveTrackDots.length - 1 ? '#ef233c' : '#ffffff'}
+            strokeWidth={i === liveTrackDots.length - 1 ? 3 : 2}
           />
         ))}
         </g>
