@@ -50,28 +50,13 @@ async function initModel(
   ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
   inputBuffer = new Float32Array(3 * inputSize * inputSize);
 
-  // Avoid duplicating large (>15MB) models in JS Uint8Array + WASM heap on iOS Safari.
-  const createSession = (opts: ort.InferenceSession.SessionOptions) =>
-    ort.InferenceSession.create(modelUrl, opts);
+  // Use WASM directly for fast, reliable startup across Chrome/Safari/Intel GPU (avoids WebGPU shader-compile hangs).
+  session = await ort.InferenceSession.create(modelUrl, {
+    executionProviders: ['wasm'],
+    graphOptimizationLevel: 'basic',
+  });
+  const activeBackend = 'WASM';
 
-  let activeBackend = 'WASM';
-  if ('gpu' in navigator) {
-    try {
-      session = await createSession({
-        executionProviders: ['webgpu'],
-        graphOptimizationLevel: 'basic',
-      });
-      activeBackend = 'WebGPU';
-    } catch {
-      session = null;
-    }
-  }
-  if (!session) {
-    session = await createSession({
-      executionProviders: ['wasm'],
-      graphOptimizationLevel: 'basic',
-    });
-  }
   // Auto-sync inputSize to the loaded ONNX model's actual tensor shape so cached/upgraded models never mismatch.
   const inputMeta = session.inputMetadata[0];
   if (inputMeta?.isTensor && typeof inputMeta.shape?.[2] === 'number' && inputMeta.shape[2] > 0) {
@@ -88,27 +73,28 @@ async function initModel(
   // Always preserve aspect ratio with YOLO letterbox padding (114 gray) so vertical phone videos never squash the baseball.
   preserveAspectRatio = true;
 
-  // Optionally load the lightweight 160x160 pitching action trigger model.
-  let actionModelReady = false;
-  if (actionModelUrl) {
-    try {
-      const actionBytes = await fetchModelBytes(actionModelUrl);
-      if (actionBytes) {
-        actionSession = await ort.InferenceSession.create(actionBytes, {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'basic',
-        });
-        actionCanvas = new OffscreenCanvas(ACTION_SIZE, ACTION_SIZE);
-        actionCtx = actionCanvas.getContext('2d', { willReadFrequently: true });
-        actionBuffer = new Float32Array(3 * ACTION_SIZE * ACTION_SIZE);
-        actionModelReady = true;
-      }
-    } catch {
-      actionSession = null;
-    }
-  }
+  // Signal READY immediately so the user can measure right away without waiting for secondary models.
+  workerScope.postMessage({ type: 'READY', backend: activeBackend, actionModelReady: false });
 
-  workerScope.postMessage({ type: 'READY', backend: activeBackend, actionModelReady });
+  // Load the lightweight 160x160 pitching action trigger model lazily in the background.
+  if (actionModelUrl) {
+    void (async () => {
+      try {
+        const actionBytes = await fetchModelBytes(actionModelUrl);
+        if (actionBytes) {
+          actionSession = await ort.InferenceSession.create(actionBytes, {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'basic',
+          });
+          actionCanvas = new OffscreenCanvas(ACTION_SIZE, ACTION_SIZE);
+          actionCtx = actionCanvas.getContext('2d', { willReadFrequently: true });
+          actionBuffer = new Float32Array(3 * ACTION_SIZE * ACTION_SIZE);
+        }
+      } catch {
+        actionSession = null;
+      }
+    })();
+  }
 }
 
 function preprocess(bitmap: ImageBitmap) {
