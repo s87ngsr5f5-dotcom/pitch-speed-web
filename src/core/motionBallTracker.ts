@@ -28,10 +28,11 @@ export function extractFlyingBallTrackFromFrames(
 ): BallDetection[] {
   if (frames.length < 5 || procWidth < 32 || procHeight < 32) return [];
 
-  const minX = region ? Math.floor(region.x * procWidth) : Math.floor(procWidth * 0.05);
-  const maxX = region ? Math.ceil((region.x + region.width) * procWidth) : Math.ceil(procWidth * 0.86);
-  const minY = region ? Math.floor(region.y * procHeight) : Math.floor(procHeight * 0.10);
-  const maxY = region ? Math.ceil((region.y + region.height) * procHeight) : Math.ceil(procHeight * 0.84);
+  // 預設鎖定在「投球飛行空中走廊」(上方 14% ~ 54%)，徹底排除畫面下半部的投手白球鞋、腿部與字幕干擾
+  const minX = region ? Math.floor(region.x * procWidth) : Math.floor(procWidth * 0.08);
+  const maxX = region ? Math.ceil((region.x + region.width) * procWidth) : Math.ceil(procWidth * 0.84);
+  const minY = region ? Math.floor(region.y * procHeight) : Math.floor(procHeight * 0.14);
+  const maxY = region ? Math.ceil((region.y + region.height) * procHeight) : Math.ceil(procHeight * 0.54);
 
   const visited = new Uint8Array(procWidth * procHeight);
   const mask = new Uint8Array(procWidth * procHeight);
@@ -117,8 +118,8 @@ export function extractFlyingBallTrackFromFrames(
         const bw = bx1 - bx0 + 1;
         const bh = by1 - by0 + 1;
         const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
-        // Small isolated bright moving object (rejects large pitcher body/limbs & 1px sensor noise)
-        if (area >= 4 && area <= 220 && Math.max(bw, bh) <= 22 && aspect <= 3.2) {
+        // 嚴格限定飛行棒球尺寸（4~110px、邊長 <= 15px），排除大型白球鞋／手套／手臂
+        if (area >= 4 && area <= 110 && Math.max(bw, bh) <= 15 && aspect <= 3.0) {
           blobs.push({
             x: sumX / area,
             y: sumY / area,
