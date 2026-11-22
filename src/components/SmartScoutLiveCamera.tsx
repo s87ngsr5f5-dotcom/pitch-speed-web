@@ -9,6 +9,7 @@ import {
   sampleQuadraticRibbon,
 } from '../data/smartScoutDefaultSessions';
 import { DEFAULT_TUNNEL_CONFIGS, MAX_PITCH_SAMPLE_GAP_MS } from '../core/smartScoutEngine';
+import { extractFlyingBallTrackFromFrames, MotionFrame } from '../core/motionBallTracker';
 import { BallDetection, PitchActionPhase, Point2D, TunnelBoxConfig } from '../types';
 import { savePitchVideoClip } from '../utils/pitchVideoStore';
 import { VideoFlightReview } from './VideoFlightReview';
@@ -455,12 +456,20 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       const stepSec = 1 / 30;
       const totalSteps = Math.max(1, Math.floor(duration / stepSec));
       const allDetections: BallDetection[] = [];
+      const motionFrames: MotionFrame[] = [];
       let foundPitch = false;
 
       const canvas = document.createElement('canvas');
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       const ctx2d = canvas.getContext('2d');
+
+      const procW = Math.min(420, video.videoWidth);
+      const procH = Math.max(32, Math.round((video.videoHeight * procW) / video.videoWidth));
+      const motionCanvas = document.createElement('canvas');
+      motionCanvas.width = procW;
+      motionCanvas.height = procH;
+      const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
 
       setCaptureMessage('AI 逐幀掃描中 0%（零掉幀模式）...');
       setLiveTrackDots([]);
@@ -471,6 +480,17 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         await seekTo(tSec);
         if (cancelled) return;
 
+        const tsMs = Math.round(tSec * 1000);
+        if (motionCtx) {
+          motionCtx.drawImage(video, 0, 0, procW, procH);
+          const rgba = motionCtx.getImageData(0, 0, procW, procH).data;
+          const gray = new Uint8Array(procW * procH);
+          for (let p = 0, q = 0; p < gray.length; p++, q += 4) {
+            gray[p] = (rgba[q] * 77 + rgba[q + 1] * 150 + rgba[q + 2] * 29) >> 8;
+          }
+          motionFrames.push({ timestampMs: tsMs, gray });
+        }
+
         let bitmap: ImageBitmap;
         try {
           bitmap = await createImageBitmap(video);
@@ -480,7 +500,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           bitmap = await createImageBitmap(canvas);
         }
 
-        const det = await onScanFrame(bitmap, Math.round(tSec * 1000), video.videoWidth, video.videoHeight);
+        const det = await onScanFrame(bitmap, tsMs, video.videoWidth, video.videoHeight);
         if (cancelled) return;
         if (det) {
           allDetections.push(det);
@@ -514,12 +534,92 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         setCaptureMessage(`AI 逐幀掃描中 ${pct}%（已偵測到 ${allDetections.length} 幀棒球）`);
       }
 
+      // 若靜態單幀 YOLO 漏掉高速動態模糊的飛行白球，啟動 3 幀時間差分飛行球軌跡追蹤（濾除準備動作與靜止物）
+      if (!cancelled && !foundPitch && motionFrames.length >= 6) {
+        setCaptureMessage('啟動 3 幀時間差分飛行球追蹤，過濾準備動作中...');
+        const motionTrack = extractFlyingBallTrackFromFrames(
+          motionFrames,
+          procW,
+          procH,
+          video.videoWidth,
+          video.videoHeight,
+          region
+        );
+        if (motionTrack.length >= 6) {
+          setLiveTrackDots(motionTrack);
+          let motionRecord = computeRealPitchFromDetections({
+            detections: motionTrack,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            cameraAngle,
+            discipline,
+            distanceMeters,
+            preferredPitchType: selectedPitchType,
+            videoUrl: uploadedVideoUrl,
+          });
+          // 若飛行軌跡本身已是乾淨的出手到接球弧線，直接由飛行時間估算速度並繪製 3D 紅色軌跡
+          if (!motionRecord) {
+            const first = motionTrack[0];
+            const last = motionTrack[motionTrack.length - 1];
+            const mid = motionTrack[Math.floor(motionTrack.length / 2)];
+            const flightTimeMs = last.timestampMs - first.timestampMs;
+            const effectiveDist = Math.max(5, distanceMeters - 1.75);
+            const estSpeed = Number(((effectiveDist * 3600) / Math.max(260, flightTimeMs) / 0.955).toFixed(1));
+            if (estSpeed >= 45 && estSpeed <= 158) {
+              const sx = first.x / video.videoWidth;
+              const sy = first.y / video.videoHeight;
+              const ex = last.x / video.videoWidth;
+              const ey = last.y / video.videoHeight;
+              const cx = Math.max(0, Math.min(1, (2 * mid.x) / video.videoWidth - (sx + ex) / 2));
+              const cy = Math.max(0, Math.min(1, (2 * mid.y) / video.videoHeight - (sy + ey) / 2));
+              const pitchType =
+                selectedPitchType && selectedPitchType !== '未標記'
+                  ? selectedPitchType
+                  : '四縫線快速球';
+              motionRecord = {
+                pitchType,
+                pitchColor: getPitchTypeColor(pitchType),
+                cameraAngle,
+                speedKmh: estSpeed,
+                measurement: {
+                  flightTimeMs,
+                  detectionCount: motionTrack.length,
+                  automaticEndpoints: true,
+                },
+                videoUrl: uploadedVideoUrl,
+                ribbonPath: {
+                  startX: sx,
+                  startY: sy,
+                  startR: cameraAngle === 'behind_pitcher' ? 22 : 5,
+                  ctrlX: cx,
+                  ctrlY: cy,
+                  endX: ex,
+                  endY: ey,
+                  endR: cameraAngle === 'behind_pitcher' ? 5 : 22,
+                },
+              };
+            }
+          }
+          if (motionRecord) {
+            foundPitch = true;
+            measuredInFileRef.current += 1;
+            setDismissedPitchId(null);
+            onNewMeasuredPitch({ ...motionRecord, snapshotUrl: captureVideoSnapshot() });
+            setCaptureMessage('');
+            setProgress(0.06);
+            setIsAnimatingRibbon(true);
+            setFileEnded(true);
+            return;
+          }
+        }
+      }
+
       if (!cancelled && !foundPitch) {
         setFileEnded(true);
         setCaptureMessage(
           allDetections.length === 0
-            ? '掃描完成：此影片未偵測到棒球（建議升級 640×640 模型或確認光線／角度）。'
-            : `掃描完成：偵測到 ${allDetections.length} 幀棒球，但未構成完整出手到進壘軌跡。`
+            ? '掃描完成：此影片未偵測到飛行中的棒球，請確認光線與鏡頭固定。'
+            : `掃描完成：偵測到 ${allDetections.length} 幀候選點，但未構成完整出手到進壘飛行軌跡。`
         );
       }
     })();
