@@ -180,10 +180,15 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   onChangePitchType,
 }) => {
   const videoRef = useRef<VideoWithRVFC | null>(null);
+  const liveStreamRef = useRef<MediaStream | null>(null);
+  const autoReturnToCameraRef = useRef<boolean>(false);
+  const isAutoRecordingRef = useRef<boolean>(false);
   const clipChunksRef = useRef<Blob[]>([]);
   const clipMimeRef = useRef<string>('video/webm');
   const actionStartStreakRef = useRef<number>(0);
   const [hasLiveCamera, setHasLiveCamera] = useState<boolean>(false);
+  const [cameraFps, setCameraFps] = useState<number>(60);
+  const [autoRecordLeftSec, setAutoRecordLeftSec] = useState<number | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [selectedPitchType, setSelectedPitchType] = useState('未標記');
   const [captureMessage, setCaptureMessage] = useState('');
@@ -254,6 +259,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       }
       recorder = null;
       clipChunksRef.current = [];
+      liveStreamRef.current = null;
       if (activeStream) {
         activeStream.getTracks().forEach((t) => t.stop());
         if (video.srcObject === activeStream) video.srcObject = null;
@@ -269,13 +275,32 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         return;
       }
 
+      // 強制優先鎖定 60fps 高幀率（支援 iOS Safari / Android Chrome / 筆電高幀率鏡頭）
       const tryConstraints: MediaStreamConstraints[] = [
         {
           video: {
             facingMode: { exact: 'environment' },
             width: { ideal: 1280 },
             height: { ideal: 720 },
-            frameRate: { ideal: 60 },
+            frameRate: { exact: 60 },
+          },
+          audio: false,
+        },
+        {
+          video: {
+            facingMode: { exact: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { min: 50, ideal: 60 },
+          },
+          audio: false,
+        },
+        {
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { exact: 60 },
           },
           audio: false,
         },
@@ -309,6 +334,18 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         setHasLiveCamera(false);
         setCaptureMessage('無法使用鏡頭。請確認相機權限，或選擇影片。');
         return;
+      }
+
+      liveStreamRef.current = activeStream;
+      const vTrack = activeStream.getVideoTracks()[0];
+      if (vTrack) {
+        try {
+          await vTrack.applyConstraints({ frameRate: { ideal: 60 } });
+        } catch {
+          // ignore if hardware locks fps
+        }
+        const actualFps = Math.round(vTrack.getSettings()?.frameRate ?? 60);
+        if (actualFps > 0) setCameraFps(actualFps);
       }
 
       video.srcObject = activeStream;
@@ -531,7 +568,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       if (cancelled || !video.videoWidth || !video.duration || !Number.isFinite(video.duration)) return;
 
       const duration = Math.min(video.duration, 15);
-      const stepSec = 1 / 30;
+      const scanFps = autoReturnToCameraRef.current && cameraFps >= 50 ? 60 : 30;
+      const stepSec = 1 / scanFps;
       const totalSteps = Math.max(1, Math.floor(duration / stepSec));
       const allDetections: BallDetection[] = [];
       const motionFrames: MotionFrame[] = [];
@@ -621,6 +659,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             setProgress(0.06);
             setIsAnimatingRibbon(true);
             setFileEnded(true);
+            if (autoReturnToCameraRef.current) {
+              autoReturnToCameraRef.current = false;
+              setUploadedVideoUrl(null);
+            }
             return;
           }
         } else if (allDetections.length >= 5) {
@@ -657,6 +699,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
               setProgress(0.06);
               setIsAnimatingRibbon(true);
               setFileEnded(true);
+              if (autoReturnToCameraRef.current) {
+                autoReturnToCameraRef.current = false;
+                setUploadedVideoUrl(null);
+              }
               return;
             }
             allDetections.length = 0;
@@ -710,6 +756,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             setProgress(0.06);
             setIsAnimatingRibbon(true);
             setFileEnded(true);
+            if (autoReturnToCameraRef.current) {
+              autoReturnToCameraRef.current = false;
+              setUploadedVideoUrl(null);
+            }
             return;
           }
         }
@@ -722,6 +772,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             ? '掃描完成：此影片未偵測到飛行中的棒球，請確認光線與鏡頭固定。'
             : `掃描完成：偵測到 ${allDetections.length} 幀候選點，但未構成完整出手到進壘飛行軌跡。`
         );
+        if (autoReturnToCameraRef.current) {
+          autoReturnToCameraRef.current = false;
+          setUploadedVideoUrl(null);
+        }
       }
     })();
 
@@ -747,21 +801,69 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     }
   }, []);
 
-  // 隨時感知投球動作：一開始投球立刻清除上一球軌跡、自動開始測速
+  const triggerAutoRecord5s = useCallback(() => {
+    const stream = liveStreamRef.current;
+    if (!stream || isAutoRecordingRef.current || typeof MediaRecorder === 'undefined') return;
+    isAutoRecordingRef.current = true;
+    if (currentPitch) setDismissedPitchId(currentPitch.id);
+    resetTrack();
+
+    const preferredTypes = ['video/mp4', 'video/webm;codecs=vp8', 'video/webm'];
+    const mimeType = preferredTypes.find((t) => MediaRecorder.isTypeSupported?.(t)) ?? '';
+    const chunks: Blob[] = [];
+    let rec: MediaRecorder;
+    try {
+      rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    } catch {
+      isAutoRecordingRef.current = false;
+      return;
+    }
+    rec.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+    };
+    const startedAt = performance.now();
+    setAutoRecordLeftSec(5.0);
+    setCaptureMessage(`${cameraFps}fps 自動錄影 5 秒中...`);
+    const countdownTimer = window.setInterval(() => {
+      const left = Math.max(0, 5.0 - (performance.now() - startedAt) / 1000);
+      setAutoRecordLeftSec(Number(left.toFixed(1)));
+      setCaptureMessage(`${cameraFps}fps 自動錄影中 ${left.toFixed(1)}s（結束後自動零掉幀測速）`);
+    }, 200);
+
+    rec.onstop = () => {
+      window.clearInterval(countdownTimer);
+      setAutoRecordLeftSec(null);
+      isAutoRecordingRef.current = false;
+      const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
+      if (blob.size > 0) {
+        autoReturnToCameraRef.current = true;
+        setUploadedVideoUrl(URL.createObjectURL(blob));
+      }
+    };
+    rec.start(250);
+    window.setTimeout(() => {
+      if (rec.state !== 'inactive') {
+        try {
+          rec.stop();
+        } catch {
+          // ignore
+        }
+      }
+    }, 5000);
+  }, [cameraFps, currentPitch, resetTrack]);
+
+  // 隨時感知投球動作：一開始投球立刻清除上一球軌跡、自動錄製 5 秒 60fps 並零掉幀測速
   useEffect(() => {
     if (!hasLiveCamera || uploadedVideoUrl || !isWorkerReady) return;
     if (actionPhase === 'pitching_start' && actionConfidence >= 0.55) {
       actionStartStreakRef.current += 1;
       if (actionStartStreakRef.current === 2) {
-        if (currentPitch) {
-          setDismissedPitchId(currentPitch.id);
-        }
-        resetTrack();
+        triggerAutoRecord5s();
       }
     } else {
       actionStartStreakRef.current = 0;
     }
-  }, [actionConfidence, actionPhase, currentPitch, hasLiveCamera, isWorkerReady, resetTrack, uploadedVideoUrl]);
+  }, [actionConfidence, actionPhase, hasLiveCamera, isWorkerReady, triggerAutoRecord5s, uploadedVideoUrl]);
 
   useEffect(() => {
     if (!latestBall || !sentTimestampsRef.current.delete(latestBall.timestampMs)) return;
@@ -1164,6 +1266,20 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5">
+          {hasLiveCamera && !uploadedVideoUrl && (
+            <button
+              type="button"
+              onClick={triggerAutoRecord5s}
+              disabled={!isWorkerReady || autoRecordLeftSec !== null}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-bold transition ${
+                autoRecordLeftSec !== null
+                  ? 'bg-red-600 text-white animate-pulse'
+                  : 'bg-emerald-600/85 hover:bg-emerald-500 text-white'
+              }`}
+            >
+              {autoRecordLeftSec !== null ? `錄影 ${autoRecordLeftSec.toFixed(1)}s` : `${cameraFps}fps 錄5秒`}
+            </button>
+          )}
           {displayPitch && (
             <button
               type="button"
