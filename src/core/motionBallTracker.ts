@@ -188,17 +188,58 @@ export function extractFlyingBallTrackFromFrames(
       }
 
       if (track.length >= 6) {
-        const dtMs = track[track.length - 1].timestampMs - track[0].timestampMs;
-        const span = Math.hypot(
-          track[track.length - 1].blob.x - track[0].blob.x,
-          track[track.length - 1].blob.y - track[0].blob.y
-        );
-        // Must have realistic pitch flight duration (340ms..820ms) and real travel distance
-        if (dtMs >= 340 && dtMs <= 820 && span >= procWidth * 0.04) {
-          const score = track.length * 10 + span * 0.25;
-          if (score > bestScore) {
-            bestScore = score;
-            bestTrack = track;
+        // 裁切首尾慢速段（濾除出手前擺臂與進手套後停滯／反彈），只保留真正高速飛行核心段
+        const stepSpeeds: number[] = [];
+        for (let k = 0; k < track.length - 1; k++) {
+          const df = Math.max(1, track[k + 1].frameIdx - track[k].frameIdx);
+          stepSpeeds.push(
+            Math.hypot(
+              track[k + 1].blob.x - track[k].blob.x,
+              track[k + 1].blob.y - track[k].blob.y
+            ) / df
+          );
+        }
+        const sortedSpd = [...stepSpeeds].sort((u, v) => u - v);
+        const vRef = sortedSpd[Math.floor(sortedSpd.length * 0.75)] ?? 0;
+        const speedFloor = Math.max(1.8, vRef * 0.42);
+
+        // 計算主飛行方向向量（取中段高速區）
+        const coreA = Math.floor(track.length * 0.25);
+        const coreB = Math.max(coreA + 1, Math.floor(track.length * 0.75));
+        const dirDx = track[coreB].blob.x - track[coreA].blob.x;
+        const dirDy = track[coreB].blob.y - track[coreA].blob.y;
+        const dirLen = Math.hypot(dirDx, dirDy) || 1;
+        const ux = dirDx / dirLen;
+        const uy = dirDy / dirLen;
+
+        const isFastForward = (k: number) => {
+          const dx = track[k + 1].blob.x - track[k].blob.x;
+          const dy = track[k + 1].blob.y - track[k].blob.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const align = (dx * ux + dy * uy) / len;
+          return stepSpeeds[k] >= speedFloor && align >= 0.35;
+        };
+
+        let s = 0;
+        let e = track.length - 1;
+        while (s + 5 <= e && !isFastForward(s)) s++;
+        while (e - 5 >= s && !isFastForward(e - 1)) e--;
+
+        const trimmed = track.slice(s, e + 1);
+        if (trimmed.length >= 6) {
+          const dtMs = trimmed[trimmed.length - 1].timestampMs - trimmed[0].timestampMs;
+          const span = Math.hypot(
+            trimmed[trimmed.length - 1].blob.x - trimmed[0].blob.x,
+            trimmed[trimmed.length - 1].blob.y - trimmed[0].blob.y
+          );
+          // 真正高速飛行時間（360ms..740ms 對應約 85–158 km/h）且具明顯位移
+          if (dtMs >= 360 && dtMs <= 740 && span >= procWidth * 0.04) {
+            const avgVel = span / Math.max(1, dtMs);
+            const score = trimmed.length * 8 + avgVel * 120 + span * 0.25;
+            if (score > bestScore) {
+              bestScore = score;
+              bestTrack = trimmed;
+            }
           }
         }
       }
