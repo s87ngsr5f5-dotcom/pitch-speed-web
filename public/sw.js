@@ -1,6 +1,6 @@
 // 版本號：更新前端 UI 時改 APP_CACHE；重新訓練替換 .onnx 模型時改 AI_CACHE
-const APP_CACHE = 'smartscout-app-v10';
-const AI_CACHE = 'pitchspeed-ai-v3';
+const APP_CACHE = 'smartscout-app-v11';
+const AI_CACHE = 'pitchspeed-ai-v4';
 const VALID_CACHES = [APP_CACHE, AI_CACHE];
 
 // 透過當前 Service Worker 作用域動態解析子路徑（相容 GitHub Pages /<repo-name>/）
