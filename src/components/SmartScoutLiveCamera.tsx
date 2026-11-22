@@ -110,7 +110,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 720 });
   const [showRibbon, setShowRibbon] = useState<boolean>(true);
   const [showStatsCard, setShowStatsCard] = useState<boolean>(true);
-  const [dismissedPitchId, setDismissedPitchId] = useState<string | null>(null);
+  // 一打開相機預設不顯示上次留存的舊球紅點／軌跡，只顯示當次新測到的球
+  const [dismissedPitchId, setDismissedPitchId] = useState<string | null>(
+    () => currentPitch?.id ?? null
+  );
   const [playbackSpeed, setPlaybackSpeed] = useState<1 | 0.5 | 0.25>(1);
   const [progress, setProgress] = useState<number>(1);
   const [isAnimatingRibbon, setIsAnimatingRibbon] = useState<boolean>(false);
