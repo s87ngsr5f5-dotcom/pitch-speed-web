@@ -50,11 +50,9 @@ async function initModel(
   ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
   inputBuffer = new Float32Array(3 * inputSize * inputSize);
 
-  const modelBytes = await fetchModelBytes(modelUrl);
+  // Avoid duplicating large (>15MB) models in JS Uint8Array + WASM heap on iOS Safari.
   const createSession = (opts: ort.InferenceSession.SessionOptions) =>
-    modelBytes
-      ? ort.InferenceSession.create(modelBytes, opts)
-      : ort.InferenceSession.create(modelUrl, opts);
+    ort.InferenceSession.create(modelUrl, opts);
 
   let activeBackend = 'WASM';
   if ('gpu' in navigator) {
@@ -65,7 +63,7 @@ async function initModel(
       });
       activeBackend = 'WebGPU';
     } catch {
-      // Browser, adapter or model does not support WebGPU.
+      session = null;
     }
   }
   if (!session) {
@@ -73,6 +71,14 @@ async function initModel(
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'basic',
     });
+  }
+  // Auto-sync inputSize to the loaded ONNX model's actual tensor shape so cached/upgraded models never mismatch.
+  const inputMeta = session.inputMetadata[0];
+  if (inputMeta?.isTensor && typeof inputMeta.shape?.[2] === 'number' && inputMeta.shape[2] > 0) {
+    inputSize = inputMeta.shape[2];
+    offscreenCanvas = new OffscreenCanvas(inputSize, inputSize);
+    ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
+    inputBuffer = new Float32Array(3 * inputSize * inputSize);
   }
   const output = session.outputMetadata[0];
   if (!output?.isTensor || output.shape.length !== 3 ||
