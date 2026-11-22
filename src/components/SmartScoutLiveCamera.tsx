@@ -70,6 +70,12 @@ interface SmartScoutLiveCameraProps {
     width: number,
     height: number
   ) => void;
+  onScanFrame: (
+    bitmap: ImageBitmap,
+    timestampMs: number,
+    width: number,
+    height: number
+  ) => Promise<BallDetection | null>;
   onNewMeasuredPitch: (
     pitch: Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'>
   ) => void;
@@ -90,6 +96,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   onBackToSession,
   onDeletePitch,
   onFrame,
+  onScanFrame,
   onNewMeasuredPitch,
   onChangePitchType,
 }) => {
@@ -325,6 +332,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
     const sendFrame = (mediaTime: number) => {
       if (
+        uploadedVideoUrl ||
         !isWorkerReady ||
         choosingRegion || reviewingFlight ||
         calibrating ||
@@ -404,17 +412,123 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     };
   }, [region, choosingRegion, calibrating, cameraAngle, discipline, isWorkerReady, isBusyRef, onFrame, resetTrack, reviewingFlight, uploadedVideoUrl]);
 
+  // SmartScout 逐幀零掉幀掃描（上傳影片專用）：不依賴 video.play()，逐幀 seek 確保 0 掉幀
+  const [scanRunId, setScanRunId] = useState(0);
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !uploadedVideoUrl || !isWorkerReady || discipline !== 'pitching') return;
-    // 以 0.25x 慢速解碼上傳影片，確保瀏覽器 WASM Worker 逐幀推論不跳幀、與全幀基準測速一致
-    video.playbackRate = 0.25;
-    void video.play().catch((error: DOMException) => {
-      if (error.name !== 'AbortError') {
-        setCaptureMessage('無法自動播放。請按「播放並分析」。');
+
+    let cancelled = false;
+    const seekTo = (timeSec: number) =>
+      new Promise<void>((resolve) => {
+        if (Math.abs(video.currentTime - timeSec) < 0.002) {
+          resolve();
+          return;
+        }
+        const onSeeked = () => {
+          video.removeEventListener('seeked', onSeeked);
+          resolve();
+        };
+        video.addEventListener('seeked', onSeeked, { once: true });
+        video.currentTime = timeSec;
+      });
+
+    const waitLoaded = () =>
+      new Promise<void>((resolve) => {
+        if (video.readyState >= 2 && video.duration > 0) {
+          resolve();
+          return;
+        }
+        const onReady = () => {
+          video.removeEventListener('loadeddata', onReady);
+          resolve();
+        };
+        video.addEventListener('loadeddata', onReady, { once: true });
+      });
+
+    (async () => {
+      video.pause();
+      await waitLoaded();
+      if (cancelled || !video.videoWidth || !video.duration || !Number.isFinite(video.duration)) return;
+
+      const duration = Math.min(video.duration, 15);
+      const stepSec = 1 / 30;
+      const totalSteps = Math.max(1, Math.floor(duration / stepSec));
+      const allDetections: BallDetection[] = [];
+      let foundPitch = false;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx2d = canvas.getContext('2d');
+
+      setCaptureMessage('AI 逐幀掃描中 0%（零掉幀模式）...');
+      setLiveTrackDots([]);
+
+      for (let i = 0; i <= totalSteps; i++) {
+        if (cancelled) return;
+        const tSec = Math.min(duration, i * stepSec);
+        await seekTo(tSec);
+        if (cancelled) return;
+
+        let bitmap: ImageBitmap;
+        try {
+          bitmap = await createImageBitmap(video);
+        } catch {
+          if (!ctx2d) continue;
+          ctx2d.drawImage(video, 0, 0, canvas.width, canvas.height);
+          bitmap = await createImageBitmap(canvas);
+        }
+
+        const det = await onScanFrame(bitmap, Math.round(tSec * 1000), video.videoWidth, video.videoHeight);
+        if (cancelled) return;
+        if (det) {
+          allDetections.push(det);
+          detectedInFileRef.current = allDetections.length;
+          setLiveTrackDots([...allDetections]);
+
+          const record = computeRealPitchFromDetections({
+            detections: allDetections,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            cameraAngle,
+            discipline,
+            distanceMeters,
+            checkpoints: manualCheckpoints,
+            preferredPitchType: selectedPitchType,
+            videoUrl: uploadedVideoUrl,
+          });
+          if (record) {
+            foundPitch = true;
+            measuredInFileRef.current += 1;
+            setDismissedPitchId(null);
+            onNewMeasuredPitch({ ...record, snapshotUrl: captureVideoSnapshot() });
+            setCaptureMessage('');
+            setProgress(0.06);
+            setIsAnimatingRibbon(true);
+            setFileEnded(true);
+            return;
+          }
+        }
+        const pct = Math.min(99, Math.round((i / totalSteps) * 100));
+        setCaptureMessage(`AI 逐幀掃描中 ${pct}%（已偵測到 ${allDetections.length} 幀棒球）`);
       }
-    });
-  }, [discipline, isWorkerReady, uploadedVideoUrl]);
+
+      if (!cancelled && !foundPitch) {
+        setFileEnded(true);
+        setCaptureMessage(
+          allDetections.length === 0
+            ? '掃描完成：此影片未偵測到棒球（建議升級 640×640 模型或確認光線／角度）。'
+            : `掃描完成：偵測到 ${allDetections.length} 幀棒球，但未構成完整出手到進壘軌跡。`
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discipline, isWorkerReady, uploadedVideoUrl, scanRunId]);
 
   const captureVideoSnapshot = useCallback((): string | undefined => {
     const video = videoRef.current;
@@ -640,8 +754,11 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     measuredInFileRef.current = 0;
     detectedInFileRef.current = 0;
     setCaptureMessage('');
+    if (uploadedVideoUrl) {
+      setScanRunId((n) => n + 1);
+      return;
+    }
     if (video.readyState >= 1) video.currentTime = 0;
-    video.playbackRate = 0.25;
     void video.play().catch(() => setCaptureMessage(
       '無法播放這部影片。請試用 H.264 編碼的 MP4。'
     ));

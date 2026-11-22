@@ -141,6 +141,7 @@ export type WorkerInMessage =
       timestampMs: number;
       origWidth: number;
       origHeight: number;
+      detectAction?: boolean;
     };
 
 export type WorkerOutMessage =

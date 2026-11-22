@@ -79,8 +79,8 @@ async function initModel(
       (output.shape[1] !== 5 && output.shape[1] !== 84)) {
     throw new Error('Expected a single-class baseball or 80-class COCO YOLO model');
   }
-  // Use the legacy stretch for COCO and training-style padding for the baseball model.
-  preserveAspectRatio = output.shape[1] === 5;
+  // Always preserve aspect ratio with YOLO letterbox padding (114 gray) so vertical phone videos never squash the baseball.
+  preserveAspectRatio = true;
 
   // Optionally load the lightweight 160x160 pitching action trigger model.
   let actionModelReady = false;
@@ -248,7 +248,7 @@ workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
           msg.timestampMs,
           frame,
         );
-        const action = await inferActionPhase(msg.bitmap);
+        const action = msg.detectAction ? await inferActionPhase(msg.bitmap) : null;
         workerScope.postMessage({
           type: 'RESULT',
           detection,

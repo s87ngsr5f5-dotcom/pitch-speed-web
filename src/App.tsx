@@ -71,6 +71,7 @@ export function App() {
 
   const workerRef = useRef<Worker | null>(null);
   const isBusyRef = useRef<boolean>(false);
+  const pendingScanResolveRef = useRef<((det: BallDetection | null) => void) | null>(null);
 
   const modelUrl = useMemo(
     () => new URL('./models/ball_yolo11n.onnx', window.location.href).href,
@@ -156,12 +157,23 @@ export function App() {
       } else if (msg.type === 'RESULT') {
         isBusyRef.current = false;
         setInferTimeMs(msg.inferTimeMs);
-        setLatestBall(msg.detection);
-        if (msg.actionPhase) {
-          setActionPhase(msg.actionPhase);
-          setActionConfidence(msg.actionConfidence ?? 0);
+        if (pendingScanResolveRef.current) {
+          const resolve = pendingScanResolveRef.current;
+          pendingScanResolveRef.current = null;
+          resolve(msg.detection);
+        } else {
+          setLatestBall(msg.detection);
+          if (msg.actionPhase) {
+            setActionPhase(msg.actionPhase);
+            setActionConfidence(msg.actionConfidence ?? 0);
+          }
         }
       } else if (msg.type === 'ERROR') {
+        if (pendingScanResolveRef.current) {
+          const resolve = pendingScanResolveRef.current;
+          pendingScanResolveRef.current = null;
+          resolve(null);
+        }
         fail(msg.message);
       }
     };
@@ -171,8 +183,8 @@ export function App() {
       modelUrl,
       actionModelUrl,
       wasmPaths: new URL('./wasm/', window.location.href).href,
-      inputSize: 320,
-      confThreshold: 0.22,
+      inputSize: 640,
+      confThreshold: 0.16,
     };
     worker.postMessage(initMsg);
 
@@ -192,7 +204,14 @@ export function App() {
       }
       try {
         w.postMessage(
-          { type: 'INFER', bitmap, timestampMs, origWidth, origHeight } satisfies WorkerInMessage,
+          {
+            type: 'INFER',
+            bitmap,
+            timestampMs,
+            origWidth,
+            origHeight,
+            detectAction: true,
+          } satisfies WorkerInMessage,
           [bitmap]
         );
       } catch (error) {
@@ -202,6 +221,45 @@ export function App() {
         setWorkerError(error instanceof Error ? error.message : String(error));
         setWorkerStatus('error');
       }
+    },
+    []
+  );
+
+  // SmartScout 逐幀零掉幀掃描專用：Promise 形式等待 Worker 回傳該幀偵測結果
+  const handleScanFrame = useCallback(
+    (
+      bitmap: ImageBitmap,
+      timestampMs: number,
+      origWidth: number,
+      origHeight: number
+    ): Promise<BallDetection | null> => {
+      const w = workerRef.current;
+      if (!w) {
+        bitmap.close();
+        return Promise.resolve(null);
+      }
+      return new Promise<BallDetection | null>((resolve) => {
+        pendingScanResolveRef.current = resolve;
+        isBusyRef.current = true;
+        try {
+          w.postMessage(
+            {
+              type: 'INFER',
+              bitmap,
+              timestampMs,
+              origWidth,
+              origHeight,
+              detectAction: false,
+            } satisfies WorkerInMessage,
+            [bitmap]
+          );
+        } catch {
+          bitmap.close();
+          isBusyRef.current = false;
+          pendingScanResolveRef.current = null;
+          resolve(null);
+        }
+      });
     },
     []
   );
@@ -359,6 +417,7 @@ export function App() {
               }
             }}
             onFrame={handleFrame}
+            onScanFrame={handleScanFrame}
             onNewMeasuredPitch={handleNewMeasuredPitch}
             onChangePitchType={(pitchId, newType) => {
               if (activeUserSession) {
