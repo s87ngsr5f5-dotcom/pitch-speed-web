@@ -30,6 +30,77 @@ type VideoWithRVFC = HTMLVideoElement & {
   cancelVideoFrameCallback?: (handle: number) => void;
 };
 
+function isFlightCorridorBall(
+  det: BallDetection,
+  videoWidth: number,
+  videoHeight: number,
+  hasRegion: boolean
+): boolean {
+  if (videoWidth <= 0 || videoHeight <= 0) return false;
+  if (det.width > videoWidth * 0.12 || det.height > videoHeight * 0.08) return false;
+  if (hasRegion) return true;
+  const ny = det.y / videoHeight;
+  return ny >= 0.10 && ny <= 0.60;
+}
+
+function buildAutoPitchFallback(params: {
+  track: BallDetection[];
+  videoWidth: number;
+  videoHeight: number;
+  cameraAngle: 'behind_pitcher' | 'behind_catcher';
+  distanceMeters: number;
+  preferredPitchType: string;
+  videoUrl?: string;
+}): Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'> | null {
+  const { track, videoWidth, videoHeight, cameraAngle, distanceMeters, preferredPitchType, videoUrl } = params;
+  if (track.length < 5) return null;
+  const first = track[0];
+  const last = track[track.length - 1];
+  const mid = track[Math.floor(track.length / 2)];
+  const flightTimeMs = last.timestampMs - first.timestampMs;
+  if (flightTimeMs < 380 || flightTimeMs > 850) return null;
+  const effectiveDist = Math.max(5, distanceMeters - 1.75);
+  const estSpeed = Number(((effectiveDist * 3600) / flightTimeMs / 0.955).toFixed(1));
+  if (estSpeed < 45 || estSpeed > 158) return null;
+
+  const sx = first.x / videoWidth;
+  const sy = first.y / videoHeight;
+  const ex = last.x / videoWidth;
+  const ey = last.y / videoHeight;
+  const cx = Math.max(0, Math.min(1, (2 * mid.x) / videoWidth - (sx + ex) / 2));
+  const cy = Math.max(0, Math.min(1, (2 * mid.y) / videoHeight - (sy + ey) / 2));
+  const pitchType =
+    preferredPitchType && preferredPitchType !== '未標記'
+      ? preferredPitchType
+      : '四縫線快速球';
+  const now = new Date();
+  const recordedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  return {
+    recordedDate,
+    pitchType,
+    pitchColor: getPitchTypeColor(pitchType),
+    cameraAngle,
+    speedKmh: estSpeed,
+    measurement: {
+      flightTimeMs,
+      detectionCount: track.length,
+      automaticEndpoints: true,
+    },
+    videoUrl,
+    ribbonPath: {
+      startX: sx,
+      startY: sy,
+      startR: cameraAngle === 'behind_pitcher' ? 22 : 5,
+      ctrlX: cx,
+      ctrlY: cy,
+      endX: ex,
+      endY: ey,
+      endR: cameraAngle === 'behind_pitcher' ? 5 : 22,
+    },
+  };
+}
+
 let lastSentTimestampMs = 0;
 const CHECKPOINTS_KEY = 'pitch-speed-checkpoints';
 const MIN_CHECKPOINT_DISTANCE = 0.08;
@@ -500,9 +571,20 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           bitmap = await createImageBitmap(canvas);
         }
 
-        const det = await onScanFrame(bitmap, tsMs, video.videoWidth, video.videoHeight);
+        const rawDet = await onScanFrame(bitmap, tsMs, video.videoWidth, video.videoHeight);
         if (cancelled) return;
+        const det =
+          rawDet && isFlightCorridorBall(rawDet, video.videoWidth, video.videoHeight, Boolean(region))
+            ? rawDet
+            : null;
         if (det) {
+          // 若與上一幀間隔過長，視為新一球出手，清掉前面準備期零星雜點
+          if (
+            allDetections.length > 0 &&
+            tsMs - allDetections[allDetections.length - 1].timestampMs > MAX_PITCH_SAMPLE_GAP_MS
+          ) {
+            allDetections.length = 0;
+          }
           allDetections.push(det);
           detectedInFileRef.current = allDetections.length;
           setLiveTrackDots([...allDetections]);
@@ -528,6 +610,44 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             setIsAnimatingRibbon(true);
             setFileEnded(true);
             return;
+          }
+        } else if (allDetections.length >= 5) {
+          // 球進捕手手套後連續消失 >= 3 幀 (~100ms)，立即結算出手到進手套飛行速度
+          const silenceMs = tsMs - allDetections[allDetections.length - 1].timestampMs;
+          if (silenceMs >= 100) {
+            const catchRecord =
+              computeRealPitchFromDetections({
+                detections: allDetections,
+                videoWidth: video.videoWidth,
+                videoHeight: video.videoHeight,
+                cameraAngle,
+                discipline,
+                distanceMeters,
+                checkpoints: manualCheckpoints,
+                preferredPitchType: selectedPitchType,
+                videoUrl: uploadedVideoUrl,
+              }) ??
+              buildAutoPitchFallback({
+                track: allDetections,
+                videoWidth: video.videoWidth,
+                videoHeight: video.videoHeight,
+                cameraAngle,
+                distanceMeters,
+                preferredPitchType: selectedPitchType,
+                videoUrl: uploadedVideoUrl,
+              });
+            if (catchRecord) {
+              foundPitch = true;
+              measuredInFileRef.current += 1;
+              setDismissedPitchId(null);
+              onNewMeasuredPitch({ ...catchRecord, snapshotUrl: captureVideoSnapshot() });
+              setCaptureMessage('');
+              setProgress(0.06);
+              setIsAnimatingRibbon(true);
+              setFileEnded(true);
+              return;
+            }
+            allDetections.length = 0;
           }
         }
         const pct = Math.min(99, Math.round((i / totalSteps) * 100));
@@ -559,46 +679,15 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           });
           // 若飛行軌跡本身已是乾淨的出手到接球弧線，直接由飛行時間估算速度並繪製 3D 紅色軌跡
           if (!motionRecord) {
-            const first = motionTrack[0];
-            const last = motionTrack[motionTrack.length - 1];
-            const mid = motionTrack[Math.floor(motionTrack.length / 2)];
-            const flightTimeMs = last.timestampMs - first.timestampMs;
-            const effectiveDist = Math.max(5, distanceMeters - 1.75);
-            const estSpeed = Number(((effectiveDist * 3600) / Math.max(260, flightTimeMs) / 0.955).toFixed(1));
-            if (estSpeed >= 45 && estSpeed <= 158) {
-              const sx = first.x / video.videoWidth;
-              const sy = first.y / video.videoHeight;
-              const ex = last.x / video.videoWidth;
-              const ey = last.y / video.videoHeight;
-              const cx = Math.max(0, Math.min(1, (2 * mid.x) / video.videoWidth - (sx + ex) / 2));
-              const cy = Math.max(0, Math.min(1, (2 * mid.y) / video.videoHeight - (sy + ey) / 2));
-              const pitchType =
-                selectedPitchType && selectedPitchType !== '未標記'
-                  ? selectedPitchType
-                  : '四縫線快速球';
-              motionRecord = {
-                pitchType,
-                pitchColor: getPitchTypeColor(pitchType),
-                cameraAngle,
-                speedKmh: estSpeed,
-                measurement: {
-                  flightTimeMs,
-                  detectionCount: motionTrack.length,
-                  automaticEndpoints: true,
-                },
-                videoUrl: uploadedVideoUrl,
-                ribbonPath: {
-                  startX: sx,
-                  startY: sy,
-                  startR: cameraAngle === 'behind_pitcher' ? 22 : 5,
-                  ctrlX: cx,
-                  ctrlY: cy,
-                  endX: ex,
-                  endY: ey,
-                  endR: cameraAngle === 'behind_pitcher' ? 5 : 22,
-                },
-              };
-            }
+            motionRecord = buildAutoPitchFallback({
+              track: motionTrack,
+              videoWidth: video.videoWidth,
+              videoHeight: video.videoHeight,
+              cameraAngle,
+              distanceMeters,
+              preferredPitchType: selectedPitchType,
+              videoUrl: uploadedVideoUrl,
+            });
           }
           if (motionRecord) {
             foundPitch = true;
@@ -666,6 +755,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     if (!latestBall || !sentTimestampsRef.current.delete(latestBall.timestampMs)) return;
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return;
+    if (!isFlightCorridorBall(latestBall, video.videoWidth, video.videoHeight, Boolean(region))) {
+      return;
+    }
 
     const track = activeTrackRef.current;
     const betweenSamples = track.length
