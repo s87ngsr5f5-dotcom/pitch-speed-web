@@ -259,6 +259,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const activeTrackRef = useRef<BallDetection[]>([]);
   const flushTimerRef = useRef<number | null>(null);
   const sentTimestampsRef = useRef(new Set<number>());
+  const playMotionFramesRef = useRef<MotionFrame[]>([]);
+  const playMotionSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const [cameraCheckpoints, setCameraCheckpoints] = useState(() => ({
     behind_pitcher: readCheckpoints('behind_pitcher'),
     behind_catcher: readCheckpoints('behind_catcher'),
@@ -452,14 +454,38 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     let timestampOffset: number | null = null;
     const sentTimestamps = sentTimestampsRef.current;
     const fallbackCanvas = document.createElement('canvas');
+    const motionCanvas = document.createElement('canvas');
+    const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
     const resetSource = () => {
       timestampOffset = null;
       lastMediaTime = -1;
       sentTimestamps.clear();
+      playMotionFramesRef.current = [];
       resetTrack();
     };
     resetSource();
     video.addEventListener('seeking', resetSource);
+
+    const captureMotionGray = (mediaTime: number) => {
+      if (!uploadedVideoUrl || autoReturnToCameraRef.current || !motionCtx || !video.videoWidth || !video.videoHeight) {
+        return;
+      }
+      if (playMotionFramesRef.current.length >= 450) return;
+      const pw = Math.min(380, video.videoWidth);
+      const ph = Math.max(32, Math.round((video.videoHeight * pw) / video.videoWidth));
+      if (motionCanvas.width !== pw || motionCanvas.height !== ph) {
+        motionCanvas.width = pw;
+        motionCanvas.height = ph;
+      }
+      playMotionSizeRef.current = { w: pw, h: ph };
+      motionCtx.drawImage(video, 0, 0, pw, ph);
+      const rgba = motionCtx.getImageData(0, 0, pw, ph).data;
+      const gray = new Uint8Array(pw * ph);
+      for (let p = 0, q = 0; p < gray.length; p++, q += 4) {
+        gray[p] = (rgba[q] * 77 + rgba[q + 1] * 150 + rgba[q + 2] * 29) >> 8;
+      }
+      playMotionFramesRef.current.push({ timestampMs: Math.round(mediaTime * 1000), gray });
+    };
 
     const captureBitmap = async () => {
       if (region) {
@@ -538,6 +564,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         if (stopped) return;
         if (meta.mediaTime !== lastMediaTime) {
           lastMediaTime = meta.mediaTime;
+          captureMotionGray(meta.mediaTime);
           sendFrame(meta.mediaTime);
         }
         rvfcId = video.requestVideoFrameCallback!(onVideoFrame);
@@ -548,6 +575,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         if (stopped) return;
         if (video.currentTime !== lastMediaTime) {
           lastMediaTime = video.currentTime;
+          captureMotionGray(lastMediaTime);
           sendFrame(lastMediaTime);
         }
         rafId = requestAnimationFrame(onRaf);
@@ -1277,6 +1305,55 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           setFilePlaying(false);
           setFileEnded(true);
           if (measuredInFileRef.current === 0) {
+            const video = videoRef.current;
+            const mFrames = playMotionFramesRef.current;
+            const { w: pw, h: ph } = playMotionSizeRef.current;
+            // 流暢播放結束若單幀 YOLO 因動態模糊漏幀，立刻在 ~15ms 內用 3 幀時間差分鎖定飛行白球並出速＋畫紅線
+            if (video && video.videoWidth > 0 && mFrames.length >= 6 && pw >= 32 && ph >= 32) {
+              const motionTrack = extractFlyingBallTrackFromFrames(
+                mFrames,
+                pw,
+                ph,
+                video.videoWidth,
+                video.videoHeight,
+                region
+              );
+              if (motionTrack.length >= 4) {
+                setLiveTrackDots(motionTrack);
+                const motionRecord =
+                  computeRealPitchFromDetections({
+                    detections: motionTrack,
+                    videoWidth: video.videoWidth,
+                    videoHeight: video.videoHeight,
+                    cameraAngle,
+                    discipline,
+                    distanceMeters,
+                    preferredPitchType: selectedPitchType,
+                    videoUrl: uploadedVideoUrl ?? undefined,
+                  }) ??
+                  buildAutoPitchFallback({
+                    track: motionTrack,
+                    videoWidth: video.videoWidth,
+                    videoHeight: video.videoHeight,
+                    cameraAngle,
+                    distanceMeters,
+                    preferredPitchType: selectedPitchType,
+                    videoUrl: uploadedVideoUrl ?? undefined,
+                  });
+                if (motionRecord) {
+                  measuredInFileRef.current += 1;
+                  setDismissedPitchId(null);
+                  onNewMeasuredPitch({
+                    ...motionRecord,
+                    snapshotUrl: captureVideoSnapshot(),
+                  });
+                  setCaptureMessage('');
+                  setProgress(0.06);
+                  setIsAnimatingRibbon(true);
+                  return;
+                }
+              }
+            }
             const area = region ? '所選範圍內' : '全畫面';
             const detected = detectedInFileRef.current;
             setCaptureMessage(detected
