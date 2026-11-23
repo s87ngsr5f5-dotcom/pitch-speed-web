@@ -1,5 +1,6 @@
 import * as ort from 'onnxruntime-web/wasm';
 import { BallDetection, PitchActionPhase, WorkerInMessage, WorkerOutMessage } from '../types';
+import { parsePitcherPose } from '../core/pitcherPoseGate';
 
 const workerScope = self as unknown as {
   postMessage: (msg: WorkerOutMessage) => void;
@@ -20,6 +21,11 @@ let inputBuffer: Float32Array | null = null;
 let actionCanvas: OffscreenCanvas | null = null;
 let actionCtx: OffscreenCanvasRenderingContext2D | null = null;
 let actionBuffer: Float32Array | null = null;
+const POSE_SIZE = 320;
+let poseSession: ort.InferenceSession | null = null;
+let poseCanvas: OffscreenCanvas | null = null;
+let poseCtx: OffscreenCanvasRenderingContext2D | null = null;
+let poseBuffer: Float32Array | null = null;
 
 async function fetchModelBytes(url: string): Promise<Uint8Array | null> {
   try {
@@ -40,7 +46,8 @@ async function initModel(
   wasmPaths: string,
   size = 320,
   threshold = 0.22,
-  actionModelUrl?: string
+  actionModelUrl?: string,
+  poseModelUrl?: string
 ) {
   inputSize = size;
   confThreshold = threshold;
@@ -96,6 +103,64 @@ async function initModel(
         actionSession = null;
       }
     })();
+  }
+
+  // 投手骨架模型（YOLO11n-pose int8, 3.2 MB）背景載入：出手閘門用，不阻塞球體偵測
+  if (poseModelUrl) {
+    void (async () => {
+      try {
+        const poseBytes = await fetchModelBytes(poseModelUrl);
+        if (poseBytes) {
+          poseSession = await ort.InferenceSession.create(poseBytes, {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'basic',
+          });
+          poseCanvas = new OffscreenCanvas(POSE_SIZE, POSE_SIZE);
+          poseCtx = poseCanvas.getContext('2d', { willReadFrequently: true });
+          poseBuffer = new Float32Array(3 * POSE_SIZE * POSE_SIZE);
+        }
+      } catch {
+        poseSession = null;
+      }
+    })();
+  }
+}
+
+async function inferPitcherPose(bitmap: ImageBitmap, origW: number, origH: number) {
+  if (!poseSession || !poseCtx || !poseBuffer) return undefined;
+  try {
+    const scale = Math.min(POSE_SIZE / bitmap.width, POSE_SIZE / bitmap.height);
+    const dw = Math.max(1, Math.round(bitmap.width * scale));
+    const dh = Math.max(1, Math.round(bitmap.height * scale));
+    const px = Math.floor((POSE_SIZE - dw) / 2);
+    const py = Math.floor((POSE_SIZE - dh) / 2);
+    poseCtx.fillStyle = 'rgb(114,114,114)';
+    poseCtx.fillRect(0, 0, POSE_SIZE, POSE_SIZE);
+    poseCtx.drawImage(bitmap, px, py, dw, dh);
+    const { data } = poseCtx.getImageData(0, 0, POSE_SIZE, POSE_SIZE);
+    const area = POSE_SIZE * POSE_SIZE;
+    const inv255 = 1 / 255;
+    for (let i = 0; i < area; i++) {
+      const idx = i * 4;
+      poseBuffer[i] = data[idx] * inv255;
+      poseBuffer[i + area] = data[idx + 1] * inv255;
+      poseBuffer[i + 2 * area] = data[idx + 2] * inv255;
+    }
+    const tensor = new ort.Tensor('float32', poseBuffer, [1, 3, POSE_SIZE, POSE_SIZE]);
+    const out = await poseSession.run({ [poseSession.inputNames[0]]: tensor });
+    const o = out[poseSession.outputNames[0]];
+    // bitmap 座標 -> 原始影片座標
+    const bitmapToOrig = origW / bitmap.width;
+    const kp = parsePitcherPose(o.data as Float32Array, o.dims[2], {
+      padX: px,
+      padY: py,
+      scale: scale / bitmapToOrig,
+      origW,
+      origH,
+    });
+    return kp ? kp.map((p) => [p[0], p[1], p[2]] as [number, number, number]) : null;
+  } catch {
+    return undefined;
   }
 }
 
@@ -243,6 +308,7 @@ workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
         msg.inputSize,
         msg.confThreshold,
         msg.actionModelUrl,
+        msg.poseModelUrl,
       );
     } else if (msg.type === 'INFER') {
       const start = performance.now();
@@ -258,12 +324,17 @@ workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
           frame,
         );
         const action = msg.detectAction ? await inferActionPhase(msg.bitmap) : null;
+        const pose = msg.detectPose
+          ? await inferPitcherPose(msg.bitmap, msg.origWidth, msg.origHeight)
+          : undefined;
         workerScope.postMessage({
           type: 'RESULT',
           detection,
           inferTimeMs: Number((performance.now() - start).toFixed(1)),
           actionPhase: action?.actionPhase,
           actionConfidence: action?.actionConfidence,
+          pose,
+          timestampMs: msg.timestampMs,
         });
       } finally {
         msg.bitmap.close();

@@ -8,6 +8,7 @@ import {
 import { deletePitchVideoClip, loadPitchVideoUrl } from './utils/pitchVideoStore';
 import { useModelCache } from './hooks/useModelCache';
 import { SmartScoutLiveCamera } from './components/SmartScoutLiveCamera';
+import { PitcherPoseGate } from './core/pitcherPoseGate';
 import { SmartScoutPitchPlayer } from './components/SmartScoutPitchPlayer';
 import { SmartScoutSessionView } from './components/SmartScoutSessionView';
 import { SmartScoutPlayerProfile } from './components/SmartScoutPlayerProfile';
@@ -72,6 +73,26 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
   const isBusyRef = useRef<boolean>(false);
   const pendingScanResolveRef = useRef<((det: BallDetection | null) => void) | null>(null);
+  // 投手骨架出手閘門（與桌面 / iOS 同邏輯）：球還在手上時一律不測速
+  const poseGateRef = useRef(new PitcherPoseGate());
+  const lastPoseRequestTsRef = useRef(-1_000_000);
+  const lastPoseIngestTsRef = useRef(-1);
+  const shouldRequestPose = (timestampMs: number, minIntervalMs: number) => {
+    // 時間軸倒退 = 新影片 / 重新掃描，重置閘門
+    if (timestampMs < lastPoseRequestTsRef.current - 100) {
+      poseGateRef.current.reset();
+      lastPoseIngestTsRef.current = -1;
+      lastPoseRequestTsRef.current = -1_000_000;
+    }
+    if (timestampMs - lastPoseRequestTsRef.current < minIntervalMs) return false;
+    lastPoseRequestTsRef.current = timestampMs;
+    return true;
+  };
+
+  const poseModelUrl = useMemo(
+    () => new URL('./models/pitcher_pose_int8.onnx', window.location.href).href,
+    []
+  );
 
   const modelUrl = useMemo(
     () => new URL('./models/ball_yolo11n.onnx?v=v3fp32', window.location.href).href,
@@ -157,6 +178,11 @@ export function App() {
       } else if (msg.type === 'RESULT') {
         isBusyRef.current = false;
         setInferTimeMs(msg.inferTimeMs);
+        if (msg.pose !== undefined && typeof msg.timestampMs === 'number') {
+          if (msg.timestampMs < lastPoseIngestTsRef.current - 100) poseGateRef.current.reset();
+          lastPoseIngestTsRef.current = msg.timestampMs;
+          poseGateRef.current.ingest(msg.pose, msg.timestampMs);
+        }
         if (pendingScanResolveRef.current) {
           const resolve = pendingScanResolveRef.current;
           pendingScanResolveRef.current = null;
@@ -182,6 +208,7 @@ export function App() {
       type: 'INIT',
       modelUrl,
       actionModelUrl,
+      poseModelUrl,
       wasmPaths: new URL('./wasm/', window.location.href).href,
       inputSize: 320,
       confThreshold: 0.16,
@@ -192,7 +219,7 @@ export function App() {
       worker.terminate();
       workerRef.current = null;
     };
-  }, [modelUrl, actionModelUrl]);
+  }, [modelUrl, actionModelUrl, poseModelUrl]);
 
   const handleFrame = useCallback(
     (bitmap: ImageBitmap, timestampMs: number, origWidth: number, origHeight: number) => {
@@ -211,6 +238,7 @@ export function App() {
             origWidth,
             origHeight,
             detectAction: true,
+            detectPose: shouldRequestPose(timestampMs, 60),
           } satisfies WorkerInMessage,
           [bitmap]
         );
@@ -250,6 +278,7 @@ export function App() {
               origWidth,
               origHeight,
               detectAction: false,
+              detectPose: shouldRequestPose(timestampMs, 30),
             } satisfies WorkerInMessage,
             [bitmap]
           );
@@ -408,6 +437,7 @@ export function App() {
             workerError={workerError}
             isBusyRef={isBusyRef}
             latestBall={latestBall}
+            poseGate={poseGateRef.current}
             actionPhase={actionPhase}
             actionConfidence={actionConfidence}
             onBackToSession={() => setNavTab('sessions')}

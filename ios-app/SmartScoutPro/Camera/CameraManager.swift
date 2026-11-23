@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import Photos
 import SwiftUI
+import Vision
 
 /// Continuous 60fps rear camera + CoreML Apple Neural Engine 640px/320px ball tracker +
 /// static background noise suppression + seamless hardware H.264 auto-recording into iPhone Photos.
@@ -27,6 +28,8 @@ final class CameraManager: NSObject, ObservableObject {
     private let videoQueue = DispatchQueue(label: "com.smartscout.camera.video", qos: .userInteractive)
     private let detector = CoreMLBallDetector()
     private let physics = PitchPhysicsEngine()
+    /// 投手骨架出手閘門：球還在手上（準備期 / 抬腿期）一律不測速
+    private let poseGate = PitcherPoseGate()
 
     private var activeTrack: [BallDetectionSample] = []
     private var flushWorkItem: DispatchWorkItem?
@@ -246,6 +249,14 @@ final class CameraManager: NSObject, ObservableObject {
 
     // MARK: - Static-Background Bin Suppressor & Trajectory Selector
 
+    /// 依影片 preferredTransform 推算 Vision 需要的方向
+    static func orientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {
+        if t.a == 0 && t.b == 1 && t.c == -1 && t.d == 0 { return .right }
+        if t.a == 0 && t.b == -1 && t.c == 1 && t.d == 0 { return .left }
+        if t.a == -1 && t.b == 0 && t.c == 0 && t.d == -1 { return .down }
+        return .up
+    }
+
     private static func binKey(x: CGFloat, y: CGFloat) -> Int {
         let bx = Int(x / 14.0)
         let by = Int(y / 14.0)
@@ -316,6 +327,8 @@ final class CameraManager: NSObject, ObservableObject {
         videoQueue.async { [weak self] in
             guard let self else { return }
             let modesToTry: [DetectorModelMode] = preferred == .highRes640 ? [.highRes640, .fast320] : [.fast320, .highRes640]
+            let importGate = PitcherPoseGate()
+            var poseScanned = false
 
             for mode in modesToTry where self.detector.hasModel(mode) {
                 let asset = AVURLAsset(url: url)
@@ -323,6 +336,7 @@ final class CameraManager: NSObject, ObservableObject {
                       let reader = try? AVAssetReader(asset: asset) else {
                     continue
                 }
+                let orientation = Self.orientation(for: track.preferredTransform)
                 let output = AVAssetReaderTrackOutput(
                     track: track,
                     outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
@@ -331,6 +345,7 @@ final class CameraManager: NSObject, ObservableObject {
                 reader.startReading()
 
                 var perFrame: [[BallDetectionSample]] = []
+                var frameTs: [Double] = []
                 var counts: [Int: Int] = [:]
                 var w: CGFloat = 720
                 var h: CGFloat = 1280
@@ -340,14 +355,27 @@ final class CameraManager: NSObject, ObservableObject {
                     w = CGFloat(CVPixelBufferGetWidth(pb))
                     h = CGFloat(CVPixelBufferGetHeight(pb))
                     let tsMs = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb)) * 1000.0
+                    if !poseScanned {
+                        importGate.process(pixelBuffer: pb, timestampMs: tsMs, orientation: orientation)
+                    }
                     let cands = self.detector.detectTopK(pixelBuffer: pb, timestampMs: tsMs, mode: mode)
                     perFrame.append(cands)
+                    frameTs.append(tsMs)
                     var seen = Set<Int>()
                     for c in cands {
                         let k = Self.binKey(x: c.x, y: c.y)
                         if seen.insert(k).inserted {
                             counts[k, default: 0] += 1
                         }
+                    }
+                }
+                poseScanned = true
+
+                // 出手閘門：只在投手真正出手後的窗口內接受球點
+                let poseSeen = frameTs.contains { importGate.isPoseAvailable(nearMs: $0) }
+                if poseSeen && !importGate.releases.isEmpty {
+                    for i in perFrame.indices where !importGate.isMeasurementAllowed(atMs: frameTs[i]) {
+                        perFrame[i] = []
                     }
                 }
 
@@ -398,7 +426,7 @@ final class CameraManager: NSObject, ObservableObject {
         flushWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            let buffered = self.activeTrack
+            let buffered = self.poseGate.filter(self.activeTrack)
             self.activeTrack.removeAll()
             DispatchQueue.main.async { self.liveDots = [] }
 
@@ -445,6 +473,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let tsMs = CMTimeGetSeconds(pts) * 1000.0
 
         appendToWriter(sampleBuffer, width: w, height: h)
+        poseGate.process(pixelBuffer: pb, timestampMs: tsMs)
 
         let mode = self.modelMode
         let cands = detector.detectTopK(pixelBuffer: pb, timestampMs: tsMs, mode: mode)

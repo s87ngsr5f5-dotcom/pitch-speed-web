@@ -131,6 +131,7 @@ export type WorkerInMessage =
       type: 'INIT';
       modelUrl: string;
       actionModelUrl?: string;
+      poseModelUrl?: string;
       wasmPaths: string;
       inputSize?: number;
       confThreshold?: number;
@@ -142,6 +143,7 @@ export type WorkerInMessage =
       origWidth: number;
       origHeight: number;
       detectAction?: boolean;
+      detectPose?: boolean;
     };
 
 export type WorkerOutMessage =
@@ -152,5 +154,8 @@ export type WorkerOutMessage =
       inferTimeMs: number;
       actionPhase?: PitchActionPhase;
       actionConfidence?: number;
+      /** 投手 17 點骨架（像素座標），undefined = 本幀未做骨架，null = 看不到投手 */
+      pose?: Array<[number, number, number]> | null;
+      timestampMs?: number;
     }
   | { type: 'ERROR'; message: string };

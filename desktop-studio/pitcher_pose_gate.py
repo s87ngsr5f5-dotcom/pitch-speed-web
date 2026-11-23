@@ -198,18 +198,50 @@ class PitcherPoseGate:
             height_bonus = 1.0 + max(-0.4, min(1.0, aboves[i] + 0.15))
             rel_scores.append(smooth_spd[i] * height_bonus if aboves[i] > -0.25 else smooth_spd[i] * 0.2)
 
-        # Find distinct release peaks (separated by at least 1.5 seconds)
+        # Find distinct release peaks (separated by at least 1.5 seconds).
+        # Rank candidates with a windup leg-lift bonus so a true post-leg-lift release
+        # beats pre-release arm-raise or post-pitch follow-through spikes.
         min_gap_frames = max(15, int(round(fps * 1.5)))
+        knee_lookback = max(6, int(round(fps * 0.9)))
+
+        def _rank_score(i: int) -> float:
+            prev_knee = max(knee_lifts[max(0, i - knee_lookback) : i], default=0.0)
+            return rel_scores[i] * (1.6 if 0.40 <= prev_knee <= 0.95 else 1.0)
+
         events: List[ReleaseEvent] = []
         candidates = sorted(
             [i for i in range(len(rel_scores)) if rel_scores[i] >= 1.6],
-            key=lambda i: rel_scores[i],
+            key=_rank_score,
             reverse=True,
         )
+        # Windup guard: a genuine release must be preceded by a visible windup
+        # (leg lift or arm cocking motion) and cannot sit in the first ~0.2 s of the clip.
+        min_pre_frames = max(4, int(round(fps * 0.2)))
+        windup_lookback = max(8, int(round(fps * 1.2)))
+        min_windup_frames = max(3, int(round(fps * 0.1)))
+
+        def _has_windup(peak: int) -> bool:
+            if peak < min_pre_frames:
+                return False
+            lo = max(0, peak - windup_lookback)
+            hi = max(lo, peak - 2)
+            count = 0
+            for j in range(lo, hi):
+                if raw_kpts[j] is None:
+                    continue
+                if knee_lifts[j] > 0.35 or smooth_spd[j] > 0.8:
+                    count += 1
+            return count >= min_windup_frames
+
+        self.rejected_no_windup: List[int] = []
         chosen_peaks: List[int] = []
         for idx in candidates:
-            if all(abs(idx - p) >= min_gap_frames for p in chosen_peaks):
-                chosen_peaks.append(idx)
+            if not all(abs(idx - p) >= min_gap_frames for p in chosen_peaks):
+                continue
+            if not _has_windup(idx):
+                self.rejected_no_windup.append(idx)
+                continue
+            chosen_peaks.append(idx)
         chosen_peaks.sort()
 
         for peak in chosen_peaks:

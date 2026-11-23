@@ -15,6 +15,7 @@ export default defineConfig({
         { src: ['public/icons/apple-touch-icon.png', 'public/icons/icon-{192,512}.png'], dest: 'icons' },
         { src: 'public/models/ball_yolo11n.onnx', dest: 'models' },
         { src: 'public/models/pitch_action_cls.onnx', dest: 'models' },
+        { src: 'public/models/pitcher_pose_int8.onnx', dest: 'models' },
         {
           src: 'node_modules/onnxruntime-web/dist/*.{wasm,mjs}',
           dest: 'wasm',

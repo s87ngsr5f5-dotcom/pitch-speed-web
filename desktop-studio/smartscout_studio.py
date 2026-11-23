@@ -597,6 +597,11 @@ def scan_video(
     allowed_frames: Optional[set[int]] = None
     if pose_gate is not None and frames:
         _, release_events = pose_gate.analyze_frames(frames, fps, stride=1)
+        rejected = getattr(pose_gate, "rejected_no_windup", [])
+        if rejected:
+            print(f"  [投手動作閘門] 排除無準備動作的假出手: {', '.join(f'f{r}' for r in sorted(rejected))}", flush=True)
+        if not release_events:
+            print("  [投手動作閘門] 未偵測到明確出手，改用全片段搜尋（含軌跡物理過濾）", flush=True)
         if release_events:
             strong = [e for e in release_events if e.peak_score >= 3.5] or release_events
             allowed_frames = set()

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_TUNNEL_CONFIGS, estimateAutomaticPitchFlight, estimatePitchFlight } from './smartScoutEngine';
 
-const cameraAngle = 'behind_pitcher';
+const cameraAngle = 'behind_pitcher' as const;
 const { releaseBox, strikeZoneBox } = DEFAULT_TUNNEL_CONFIGS[cameraAngle];
 const videoWidth = 1000;
 const videoHeight = 600;
@@ -67,6 +67,15 @@ describe('automatic endpoints', () => {
   it('does not treat a ball disappearing or a late first detection as catch or release', () => {
     expect(auto([held, ...flight])).toBeNull();
     expect(auto([...flight, ...stopped])).toBeNull();
+  });
+
+  it('waits for finalization before using a shrinking track without a visible stop', () => {
+    const shrinkingTrack = flight.map((sample, index) => ({
+      ...sample, width: 11 - index * 0.65, height: 11 - index * 0.65,
+    }));
+    const input = { detections: shrinkingTrack, videoWidth, videoHeight, cameraAngle, distanceMeters: 18.44 };
+    expect(estimateAutomaticPitchFlight({ ...input, isFinalized: false })).toBeNull();
+    expect(estimateAutomaticPitchFlight({ ...input, isFinalized: true })).toMatchObject({ flightTimeMs: 400 });
   });
 
   it('does not bridge missing frames or accept a ball stopping at the image edge', () => {
