@@ -13,6 +13,7 @@ const ACTION_SIZE = 160;
 const ACTION_LABELS: PitchActionPhase[] = ['idle', 'pitching_end', 'pitching_start'];
 let confThreshold = 0.22;
 let preserveAspectRatio = false;
+let isSingleClassModel = false;
 let offscreenCanvas: OffscreenCanvas | null = null;
 let ctx: OffscreenCanvasRenderingContext2D | null = null;
 let inputBuffer: Float32Array | null = null;
@@ -72,6 +73,7 @@ async function initModel(
   }
   // Always preserve aspect ratio with YOLO letterbox padding (114 gray) so vertical phone videos never squash the baseball.
   preserveAspectRatio = true;
+  isSingleClassModel = output.shape[1] === 5;
 
   // Signal READY immediately so the user can measure right away without waiting for secondary models.
   workerScope.postMessage({ type: 'READY', backend: activeBackend, actionModelReady: false });
@@ -99,9 +101,8 @@ async function initModel(
 
 function preprocess(bitmap: ImageBitmap) {
   if (!ctx || !inputBuffer) throw new Error('Canvas buffer not initialized');
-  // 自動「投球通道變焦裁切 (Tunnel-Zoom)」：對完整影片裁切上中段投球走廊 (x:10%-90%, y:10%-65%)，
-  // 讓 320x320 模型獲得等效 ~640x640 的小球像素解析度，同時維持 1.6 GFLOPs (20 FPS) 即時速度並濾除白球鞋
-  const useTunnelZoom = inputSize <= 384 && bitmap.height >= 480 && bitmap.width >= 360;
+  // 單類別自訓棒球模型使用完整畫面 320x320 Letterbox（與訓練分佈 100% 一致，準度最高）；僅 COCO 通用模型才啟用變焦裁切
+  const useTunnelZoom = !isSingleClassModel && inputSize <= 384 && bitmap.height >= 480 && bitmap.width >= 360;
   const srcX = useTunnelZoom ? Math.floor(bitmap.width * 0.10) : 0;
   const srcY = useTunnelZoom ? Math.floor(bitmap.height * 0.10) : 0;
   const srcW = useTunnelZoom ? Math.floor(bitmap.width * 0.80) : bitmap.width;

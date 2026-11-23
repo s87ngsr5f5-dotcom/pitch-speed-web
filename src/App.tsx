@@ -74,7 +74,7 @@ export function App() {
   const pendingScanResolveRef = useRef<((det: BallDetection | null) => void) | null>(null);
 
   const modelUrl = useMemo(
-    () => new URL('./models/ball_yolo11n.onnx?v=320tz1', window.location.href).href,
+    () => new URL('./models/ball_yolo11n.onnx?v=v3fp32', window.location.href).href,
     []
   );
   const actionModelUrl = useMemo(

@@ -43,10 +43,10 @@ function isFlightCorridorBall(
   hasRegion: boolean
 ): boolean {
   if (videoWidth <= 0 || videoHeight <= 0) return false;
-  if (det.width > videoWidth * 0.12 || det.height > videoHeight * 0.08) return false;
+  if (det.width > videoWidth * 0.14 || det.height > videoHeight * 0.10) return false;
   if (hasRegion) return true;
   const ny = det.y / videoHeight;
-  return ny >= 0.10 && ny <= 0.60;
+  return ny >= 0.08 && ny <= 0.78;
 }
 
 function buildAutoPitchFallback(params: {
@@ -603,7 +603,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     if (!video || !uploadedVideoUrl || !isWorkerReady || discipline !== 'pitching') return;
 
     if (!autoReturnToCameraRef.current) {
-      video.playbackRate = 0.5;
+      // 以 0.25x 平滑慢動作播放（每幀間隔 133ms > WASM 50ms），確保全幀不掉幀且即時出軌跡與精準球速
+      video.playbackRate = 0.25;
       setCaptureMessage('');
       void video.play().catch((error: DOMException) => {
         if (error.name !== 'AbortError') {
@@ -1078,7 +1079,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         setCaptureMessage('有偵測到球，但還無法確認出手與接球。可調整測速框後再試。');
       }
       resetTrack();
-    }, uploadedVideoUrl ? 350 : 200);
+    }, uploadedVideoUrl ? 750 : 200);
   }, [
     cameraAngle,
     captureVideoSnapshot,
@@ -1181,7 +1182,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       return;
     }
     if (video.readyState >= 1) video.currentTime = 0;
-    video.playbackRate = uploadedVideoUrl ? 0.5 : 1;
+    video.playbackRate = uploadedVideoUrl ? 0.25 : 1;
     void video.play().catch(() => setCaptureMessage(
       '無法播放這部影片。請試用 H.264 編碼的 MP4。'
     ));
@@ -1318,7 +1319,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
                 video.videoHeight,
                 region
               );
-              if (motionTrack.length >= 4) {
+              const isUpwardBodySwing =
+                motionTrack.length >= 2 &&
+                motionTrack[motionTrack.length - 1].y - motionTrack[0].y < -video.videoHeight * 0.05;
+              if (motionTrack.length >= 4 && !isUpwardBodySwing) {
                 setLiveTrackDots(motionTrack);
                 const motionRecord =
                   computeRealPitchFromDetections({
@@ -1364,7 +1368,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         onLoadedMetadata={(event) => {
           const video = event.currentTarget;
           setFrameSize({ width: video.videoWidth, height: video.videoHeight });
-          video.playbackRate = uploadedVideoUrl ? 0.5 : 1;
+          video.playbackRate = uploadedVideoUrl ? 0.25 : 1;
         }}
         onResize={(event) => {
           const video = event.currentTarget;
