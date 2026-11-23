@@ -11,11 +11,18 @@ venv/
 datasets/
 runs/
 *.pt
+!ios-app/SmartScoutPro/Models/ball_yolo11n.pt
 
 # OS & Editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# Local studio outputs & iOS build artifacts (never commit user videos/IPAs)
+desktop-studio/output/
+ios-app/build/
+ios-app/*.xcodeproj/
+ios-app/SmartScoutPro/Models/*.mlpackage/
 
 # Note: Do NOT ignore package-lock.json or public/models/ball_yolo11n.onnx

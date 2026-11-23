@@ -1,0 +1,81 @@
+name: Build iPhone Native App (.ipa + CoreML)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "ios-app/**"
+      - ".github/workflows/build-ios-ipa.yml"
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python for CoreML export
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install xcodegen and CoreML conversion tools
+        run: |
+          brew install xcodegen
+          pip install --upgrade pip
+          pip install ultralytics coremltools
+
+      - name: Convert YOLO11n (.pt) to Apple Neural Engine CoreML (.mlpackage)
+        run: |
+          python3 - <<'EOF'
+          from pathlib import Path
+          import shutil
+          from ultralytics import YOLO
+
+          pt_path = Path("ios-app/SmartScoutPro/Models/ball_yolo11n.pt")
+          if not pt_path.exists():
+              raise FileNotFoundError(f"Missing {pt_path}")
+
+          model = YOLO(str(pt_path))
+          exported = Path(model.export(format="coreml", imgsz=320, nms=False, half=True))
+          dst = Path("ios-app/SmartScoutPro/Models/BaseballDetector.mlpackage")
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.move(str(exported), str(dst))
+          print("Successfully exported CoreML model to:", dst)
+          EOF
+
+      - name: Generate Xcode project with XcodeGen
+        working-directory: ios-app
+        run: xcodegen generate
+
+      - name: Build unsigned arm64 iOS app (.app)
+        working-directory: ios-app
+        run: |
+          xcodebuild \
+            -project SmartScoutPro.xcodeproj \
+            -scheme SmartScoutPro \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package SmartScoutPro-unsigned.ipa
+        working-directory: ios-app
+        run: |
+          mkdir -p build/ipa/Payload
+          cp -R build/Build/Products/Release-iphoneos/SmartScoutPro.app build/ipa/Payload/
+          cd build/ipa
+          zip -r ../SmartScoutPro-unsigned.ipa Payload
+
+      - name: Upload SmartScoutPro-unsigned.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartScoutPro-iPhone-IPA
+          path: ios-app/build/SmartScoutPro-unsigned.ipa
+          retention-days: 30
