@@ -614,7 +614,8 @@ def scan_video(
                 continue
             ts = round(idx * 1000.0 / fps, 2)
             chosen = None
-            if len(dets) >= 2 and (ts - dets[-1].timestamp_ms) <= MAX_PITCH_SAMPLE_GAP_MS:
+            in_flight = len(dets) >= 2 and (ts - dets[-1].timestamp_ms) <= MAX_PITCH_SAMPLE_GAP_MS
+            if in_flight:
                 dt_prev = max(1.0, dets[-1].timestamp_ms - dets[-2].timestamp_ms)
                 dt_now = ts - dets[-1].timestamp_ms
                 vx = (dets[-1].x - dets[-2].x) / dt_prev
@@ -623,11 +624,11 @@ def scan_video(
                 pred_y = dets[-1].y + vy * dt_now
                 near = [
                     c for c in dyn
-                    if math.hypot(c[0] - pred_x, c[1] - pred_y) <= max(42.0, w * 0.12)
+                    if math.hypot(c[0] - pred_x, c[1] - pred_y) <= max(46.0, w * 0.14)
                 ]
                 if near:
                     chosen = min(near, key=lambda c: math.hypot(c[0] - pred_x, c[1] - pred_y))
-            if chosen is None:
+            if chosen is None and not (len(dets) >= 4 and in_flight):
                 high = [c for c in dyn if c[4] >= thresh]
                 if high:
                     chosen = high[0]
