@@ -448,7 +448,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
     const sendFrame = (mediaTime: number) => {
       if (
-        uploadedVideoUrl ||
+        (uploadedVideoUrl && autoReturnToCameraRef.current) ||
         !isWorkerReady ||
         choosingRegion || reviewingFlight ||
         calibrating ||
@@ -528,11 +528,22 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     };
   }, [region, choosingRegion, calibrating, cameraAngle, discipline, isWorkerReady, isBusyRef, onFrame, resetTrack, reviewingFlight, uploadedVideoUrl]);
 
-  // SmartScout 逐幀零掉幀掃描（上傳影片專用）：不依賴 video.play()，逐幀 seek 確保 0 掉幀
+  // 上傳影片預設流暢播放即時畫出軌跡＋馬上出速；僅背景 5 秒自動錄影才走離線逐幀 seek
   const [scanRunId, setScanRunId] = useState(0);
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !uploadedVideoUrl || !isWorkerReady || discipline !== 'pitching') return;
+
+    if (!autoReturnToCameraRef.current) {
+      video.playbackRate = 0.5;
+      setCaptureMessage('');
+      void video.play().catch((error: DOMException) => {
+        if (error.name !== 'AbortError') {
+          setCaptureMessage('無法自動播放。請按「播放並分析」。');
+        }
+      });
+      return;
+    }
 
     let cancelled = false;
     const seekTo = (timeSec: number) =>
@@ -1060,11 +1071,12 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     measuredInFileRef.current = 0;
     detectedInFileRef.current = 0;
     setCaptureMessage('');
-    if (uploadedVideoUrl) {
+    if (uploadedVideoUrl && autoReturnToCameraRef.current) {
       setScanRunId((n) => n + 1);
       return;
     }
     if (video.readyState >= 1) video.currentTime = 0;
+    video.playbackRate = uploadedVideoUrl ? 0.5 : 1;
     void video.play().catch(() => setCaptureMessage(
       '無法播放這部影片。請試用 H.264 編碼的 MP4。'
     ));
