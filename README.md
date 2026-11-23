@@ -2,6 +2,13 @@
 
 - **線上公開網址 (GitHub Pages)**：https://s87ngsr5f5-dotcom.github.io/pitch-speed-web/
 - **GitHub 程式碼倉庫**：https://github.com/s87ngsr5f5-dotcom/pitch-speed-web
+- **完整專案手冊（三端架構、禁動清單、後續優化路線圖）**：[PROJECT_HANDBOOK.md](PROJECT_HANDBOOK.md)
+- **iPhone 原生 60fps CoreML App 安裝指南（免 Mac）**：[ios-app/README.md](ios-app/README.md)
+
+本專案同時提供三大平台：
+1. **網頁 PWA 版**（`src/`）：iPhone Safari / 電腦即開即用，`YOLO11n@320 FP32` 2.38 秒載入、連續測速＋自動分段落錄影存至 IndexedDB。
+2. **Windows 電腦高精度工作站**（`desktop-studio/`）：雙擊桌面捷徑即開，內建 `320 + 640` 雙模型＋FFmpeg 自動產出 3D 軌跡彩帶與 8 項數據卡 `.mp4` 成品，支援視窗內一鍵「🔄 檢查並更新」。
+3. **iPhone 原生 60fps CoreML App**（`ios-app/`）：SwiftUI + Apple Neural Engine 雙模型（預設 `640 高精度` / 一鍵切 `320 極速`），真正吃滿 60fps、中文語音報速、每球直存 iPhone 相簿。
 
 結合 **SmartScout Baseball 投手正後方 / 捕手正前方縱深追蹤介面** 與 **18.44m 物理測速引擎** 的全功能棒球投打 AI 分析 PWA：
 - **SmartScout 經典 3D 紅色漸變彗星彩帶軌跡 (`投球 #1`)**：支援從投手正後方或正前方拍攝，自動繪製立體紅色彩帶軌跡、4 顆右側懸浮控制鈕（紅圈軌跡開關、1x/0.5x/0.25x 慢動作錶盤、下載含數據圖卡、數據卡開關）、底部深色半透明 8 大數據卡（`球速 km/h`、`球種下拉選單`、`垂直變化量 VB [cm]`、`水平變化量 HB [cm]`、`轉速 S [rpm]`、`有效轉速 AS [rpm]`、`效率 E [%]`、`旋轉方向 SD`、`陀螺角度 GD [°]`）與白色時間軸滑桿。
