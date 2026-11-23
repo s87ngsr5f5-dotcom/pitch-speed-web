@@ -141,8 +141,8 @@ export function estimateAutomaticPitchFlight({
           const first = points[s];
           const last = points[e];
           const span = Math.hypot(last.x - first.x, last.y - first.y);
-          // 必須確認球已進手套停住 (e < segEnd) 或已完全消失結算 (isFinalized)，嚴禁球飛到一半就提早觸發算出 158+ 假高速！
-          const hasEndStop = e < segEnd || (isFinalized && sizeRatio >= 1.45);
+          // 必須確認球已進手套完全消失結算 (isFinalized)，嚴禁球飛到一半因遠端單幀慢速就提早觸發算出假高速！
+          const hasEndStop = isFinalized && (e < segEnd || sizeRatio >= 1.45);
           const isDepthTrack = sizeRatio >= 1.35 && span >= 0.014;
           const isObliqueTrack = sizeRatio >= 1.15 && span >= 0.14 && e < segEnd;
           const releasePadMs = s === segStart && steps[s]?.dt > 45 ? 33.37 : 0;
