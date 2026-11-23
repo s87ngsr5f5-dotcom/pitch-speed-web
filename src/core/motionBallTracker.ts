@@ -10,6 +10,7 @@ interface CandidateBlob {
   y: number;
   w: number;
   h: number;
+  area: number;
   brightness: number;
 }
 
@@ -125,6 +126,7 @@ export function extractFlyingBallTrackFromFrames(
             y: sumY / area,
             w: bw,
             h: bh,
+            area,
             brightness: sumB / area,
           });
         }
@@ -189,54 +191,58 @@ export function extractFlyingBallTrackFromFrames(
       }
 
       if (track.length >= 6) {
-        // 裁切首尾慢速段（濾除出手前擺臂與進手套後停滯／反彈），只保留真正高速飛行核心段
-        const stepSpeeds: number[] = [];
-        for (let k = 0; k < track.length - 1; k++) {
-          const df = Math.max(1, track[k + 1].frameIdx - track[k].frameIdx);
-          stepSpeeds.push(
-            Math.hypot(
-              track[k + 1].blob.x - track[k].blob.x,
-              track[k + 1].blob.y - track[k].blob.y
-            ) / df
-          );
+        // 1) 峰值面積出手裁切（Peak-Area Release）：
+        //    投手後方視角在真正出手瞬間球與手最靠近鏡頭（面積達峰值），出手後持續遠離縮小；
+        //    若前 45% 出現明顯面積成長峰值，裁掉先前尚未出手的揮臂起手影格
+        let trimmed = track;
+        const firstHalfLen = Math.max(3, Math.floor(trimmed.length * 0.45));
+        let peakIdx = 0;
+        for (let k = 1; k < firstHalfLen; k++) {
+          if (trimmed[k].blob.area > trimmed[peakIdx].blob.area) peakIdx = k;
         }
-        const sortedSpd = [...stepSpeeds].sort((u, v) => u - v);
-        const vRef = sortedSpd[Math.floor(sortedSpd.length * 0.75)] ?? 0;
-        const speedFloor = Math.max(1.8, vRef * 0.42);
+        if (
+          peakIdx > 0 &&
+          trimmed[peakIdx].blob.area >= trimmed[0].blob.area * 1.8 &&
+          trimmed.length - peakIdx >= 6
+        ) {
+          trimmed = trimmed.slice(Math.max(0, peakIdx - 1));
+        }
 
-        // 計算主飛行方向向量（取中段高速區）
-        const coreA = Math.floor(track.length * 0.25);
-        const coreB = Math.max(coreA + 1, Math.floor(track.length * 0.75));
-        const dirDx = track[coreB].blob.x - track[coreA].blob.x;
-        const dirDy = track[coreB].blob.y - track[coreA].blob.y;
-        const dirLen = Math.hypot(dirDx, dirDy) || 1;
-        const ux = dirDx / dirLen;
-        const uy = dirDy / dirLen;
+        // 2) 裁切進手套後的反彈／停滯尾段（僅移除方向反轉或近乎靜止點）
+        if (trimmed.length >= 6) {
+          const coreA = Math.max(0, Math.floor(trimmed.length * 0.15));
+          const coreB = Math.min(trimmed.length - 1, Math.floor(trimmed.length * 0.75));
+          const dirDx = trimmed[coreB].blob.x - trimmed[coreA].blob.x;
+          const dirDy = trimmed[coreB].blob.y - trimmed[coreA].blob.y;
+          const dirLen = Math.hypot(dirDx, dirDy) || 1;
+          const ux = dirDx / dirLen;
+          const uy = dirDy / dirLen;
 
-        const isFastForward = (k: number) => {
-          const dx = track[k + 1].blob.x - track[k].blob.x;
-          const dy = track[k + 1].blob.y - track[k].blob.y;
-          const len = Math.hypot(dx, dy) || 1;
-          const align = (dx * ux + dy * uy) / len;
-          return stepSpeeds[k] >= speedFloor && align >= 0.35;
-        };
+          let e = trimmed.length - 1;
+          while (e >= 6) {
+            const dx = trimmed[e].blob.x - trimmed[e - 1].blob.x;
+            const dy = trimmed[e].blob.y - trimmed[e - 1].blob.y;
+            const st = Math.hypot(dx, dy);
+            const align = st > 1e-6 ? (dx * ux + dy * uy) / st : 0;
+            if (st < 1.6 || align < -0.1) {
+              e--;
+            } else {
+              break;
+            }
+          }
+          trimmed = trimmed.slice(0, e + 1);
+        }
 
-        let s = 0;
-        let e = track.length - 1;
-        while (s + 5 <= e && !isFastForward(s)) s++;
-        while (e - 5 >= s && !isFastForward(e - 1)) e--;
-
-        const trimmed = track.slice(s, e + 1);
         if (trimmed.length >= 6) {
           const dtMs = trimmed[trimmed.length - 1].timestampMs - trimmed[0].timestampMs;
           const span = Math.hypot(
             trimmed[trimmed.length - 1].blob.x - trimmed[0].blob.x,
             trimmed[trimmed.length - 1].blob.y - trimmed[0].blob.y
           );
-          // 真正高速飛行時間（360ms..740ms 對應約 85–158 km/h）且具明顯位移
-          if (dtMs >= 360 && dtMs <= 740 && span >= procWidth * 0.04) {
+          // 真正高速飛行時間（410ms..680ms 對應約 92–153 km/h）且具明顯位移
+          if (dtMs >= 410 && dtMs <= 680 && span >= procWidth * 0.04) {
             const avgVel = span / Math.max(1, dtMs);
-            const score = trimmed.length * 8 + avgVel * 120 + span * 0.25;
+            const score = trimmed.length * 10 + avgVel * 120;
             if (score > bestScore) {
               bestScore = score;
               bestTrack = trimmed;
