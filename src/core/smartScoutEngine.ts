@@ -32,13 +32,15 @@ interface PitchFlightParams {
   distanceMeters: number;
   extensionMeters?: number;
   checkpoints?: TunnelBoxConfig;
+  /** True only after the ball has disappeared into the catcher's mitt (prevents premature mid-flight firing!). */
+  isFinalized?: boolean;
 }
 
 export const MAX_PITCH_SAMPLE_GAP_MS = 145;
 
 /** Infer endpoints from visible held-ball, flight and stopped-ball observations. */
 export function estimateAutomaticPitchFlight({
-  detections, videoWidth, videoHeight, distanceMeters, extensionMeters = 1.75,
+  detections, videoWidth, videoHeight, distanceMeters, extensionMeters = 1.75, isFinalized = true,
 }: PitchFlightParams) {
   const distance = distanceMeters - extensionMeters;
   if (!(videoWidth > 0 && videoHeight > 0 && distance > 0 && Number.isFinite(distance))) return null;
@@ -139,7 +141,8 @@ export function estimateAutomaticPitchFlight({
           const first = points[s];
           const last = points[e];
           const span = Math.hypot(last.x - first.x, last.y - first.y);
-          const hasEndStop = e < segEnd || sizeRatio >= 1.45;
+          // 必須確認球已進手套停住 (e < segEnd) 或已完全消失結算 (isFinalized)，嚴禁球飛到一半就提早觸發算出 158+ 假高速！
+          const hasEndStop = e < segEnd || (isFinalized && sizeRatio >= 1.45);
           const isDepthTrack = sizeRatio >= 1.35 && span >= 0.014;
           const isObliqueTrack = sizeRatio >= 1.15 && span >= 0.14 && e < segEnd;
           const releasePadMs = s === segStart && steps[s]?.dt > 45 ? 33.37 : 0;

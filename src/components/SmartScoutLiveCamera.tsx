@@ -1003,6 +1003,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       checkpoints: manualCheckpoints,
       preferredPitchType: selectedPitchType,
       videoUrl: uploadedVideoUrl ?? undefined,
+      isFinalized: false,
     });
 
     if (record) {
@@ -1051,6 +1052,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             checkpoints: manualCheckpoints,
             preferredPitchType: selectedPitchType,
             videoUrl: uploadedVideoUrl ?? undefined,
+            isFinalized: true,
           }) ??
           buildAutoPitchFallback({
             track: buffered,

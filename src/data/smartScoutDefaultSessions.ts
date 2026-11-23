@@ -231,6 +231,7 @@ export function computeRealPitchFromDetections(params: {
   snapshotUrl?: string;
   videoUrl?: string;
   videoClipId?: string;
+  isFinalized?: boolean;
 }): Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'> | null {
   if (params.discipline !== 'pitching') return null;
   const automaticEndpoints = !params.checkpoints;
