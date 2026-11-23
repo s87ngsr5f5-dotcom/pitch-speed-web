@@ -1,4 +1,4 @@
-import * as ort from 'onnxruntime-web/webgpu';
+import * as ort from 'onnxruntime-web/wasm';
 import { BallDetection, PitchActionPhase, WorkerInMessage, WorkerOutMessage } from '../types';
 
 const workerScope = self as unknown as {
@@ -99,16 +99,24 @@ async function initModel(
 
 function preprocess(bitmap: ImageBitmap) {
   if (!ctx || !inputBuffer) throw new Error('Canvas buffer not initialized');
-  const scale = Math.min(inputSize / bitmap.width, inputSize / bitmap.height);
-  const drawWidth = preserveAspectRatio ? Math.max(1, Math.round(bitmap.width * scale)) : inputSize;
-  const drawHeight = preserveAspectRatio ? Math.max(1, Math.round(bitmap.height * scale)) : inputSize;
+  // 自動「投球通道變焦裁切 (Tunnel-Zoom)」：對完整影片裁切上中段投球走廊 (x:10%-90%, y:10%-65%)，
+  // 讓 320x320 模型獲得等效 ~640x640 的小球像素解析度，同時維持 1.6 GFLOPs (20 FPS) 即時速度並濾除白球鞋
+  const useTunnelZoom = inputSize <= 384 && bitmap.height >= 480 && bitmap.width >= 360;
+  const srcX = useTunnelZoom ? Math.floor(bitmap.width * 0.10) : 0;
+  const srcY = useTunnelZoom ? Math.floor(bitmap.height * 0.10) : 0;
+  const srcW = useTunnelZoom ? Math.floor(bitmap.width * 0.80) : bitmap.width;
+  const srcH = useTunnelZoom ? Math.floor(bitmap.height * 0.55) : bitmap.height;
+
+  const scale = Math.min(inputSize / srcW, inputSize / srcH);
+  const drawWidth = preserveAspectRatio ? Math.max(1, Math.round(srcW * scale)) : inputSize;
+  const drawHeight = preserveAspectRatio ? Math.max(1, Math.round(srcH * scale)) : inputSize;
   const padX = Math.floor((inputSize - drawWidth) / 2);
   const padY = Math.floor((inputSize - drawHeight) / 2);
   if (preserveAspectRatio) {
     ctx.fillStyle = 'rgb(114,114,114)';
     ctx.fillRect(0, 0, inputSize, inputSize);
   }
-  ctx.drawImage(bitmap, padX, padY, drawWidth, drawHeight);
+  ctx.drawImage(bitmap, srcX, srcY, srcW, srcH, padX, padY, drawWidth, drawHeight);
   const { data } = ctx.getImageData(0, 0, inputSize, inputSize);
   const area = inputSize * inputSize;
   const inv255 = 1 / 255;
@@ -128,6 +136,12 @@ function preprocess(bitmap: ImageBitmap) {
     padY,
     drawWidth,
     drawHeight,
+    srcX,
+    srcY,
+    srcW,
+    srcH,
+    bitmapW: bitmap.width,
+    bitmapH: bitmap.height,
   };
 }
 
@@ -136,7 +150,7 @@ function parseBestBall(
   origWidth: number,
   origHeight: number,
   timestampMs: number,
-  { padX, padY, drawWidth, drawHeight }: ReturnType<typeof preprocess>
+  { padX, padY, drawWidth, drawHeight, srcX, srcY, srcW, srcH, bitmapW, bitmapH }: ReturnType<typeof preprocess>
 ): BallDetection | null {
   const data = output.data as Float32Array;
   const channels = output.dims[1];
@@ -165,13 +179,15 @@ function parseBestBall(
   }
   if (bestIdx === -1) return null;
 
-  const scaleX = origWidth / drawWidth;
-  const scaleY = origHeight / drawHeight;
+  const mapX = origWidth / bitmapW;
+  const mapY = origHeight / bitmapH;
+  const cropScaleX = srcW / drawWidth;
+  const cropScaleY = srcH / drawHeight;
   return {
-    x: (data[bestIdx] - padX) * scaleX,
-    y: (data[anchors + bestIdx] - padY) * scaleY,
-    width: data[2 * anchors + bestIdx] * scaleX,
-    height: data[3 * anchors + bestIdx] * scaleY,
+    x: (srcX + (data[bestIdx] - padX) * cropScaleX) * mapX,
+    y: (srcY + (data[anchors + bestIdx] - padY) * cropScaleY) * mapY,
+    width: data[2 * anchors + bestIdx] * cropScaleX * mapX,
+    height: data[3 * anchors + bestIdx] * cropScaleY * mapY,
     confidence: bestScore,
     timestampMs,
   };

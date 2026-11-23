@@ -4,12 +4,17 @@ import {
   SMARTSCOUT_PITCH_TYPES,
   SmartScoutPitchRecord,
   buildTaperedRibbonPolygon,
+  classifyPitchTypeFromTrajectory,
   cleanAndSmoothTrajectory,
   computeRealPitchFromDetections,
   getPitchTypeColor,
   sampleQuadraticRibbon,
 } from '../data/smartScoutDefaultSessions';
-import { DEFAULT_TUNNEL_CONFIGS, MAX_PITCH_SAMPLE_GAP_MS } from '../core/smartScoutEngine';
+import {
+  DEFAULT_TUNNEL_CONFIGS,
+  MAX_PITCH_SAMPLE_GAP_MS,
+  buildSmartScoutMetrics,
+} from '../core/smartScoutEngine';
 import { extractFlyingBallTrackFromFrames, MotionFrame } from '../core/motionBallTracker';
 import { BallDetection, PitchActionPhase, Point2D, TunnelBoxConfig } from '../types';
 import { savePitchVideoClip } from '../utils/pitchVideoStore';
@@ -55,7 +60,7 @@ function buildAutoPitchFallback(params: {
 }): Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'> | null {
   const { track: rawTrack, videoWidth, videoHeight, cameraAngle, distanceMeters, preferredPitchType, videoUrl } = params;
   const track = cleanAndSmoothTrajectory(rawTrack, videoWidth);
-  if (track.length < 5) return null;
+  if (track.length < 4) return null;
   const first = track[0];
   const last = track[track.length - 1];
   const midIdx = Math.floor(track.length / 2);
@@ -65,7 +70,7 @@ function buildAutoPitchFallback(params: {
     y: midWindow.reduce((s, p) => s + p.y, 0) / midWindow.length,
   };
   const flightTimeMs = last.timestampMs - first.timestampMs;
-  if (flightTimeMs < 380 || flightTimeMs > 850) return null;
+  if (flightTimeMs < 360 || flightTimeMs > 880) return null;
   const effectiveDist = Math.max(5, distanceMeters - 1.75);
   const estSpeed = Number(((effectiveDist * 3600) / flightTimeMs / 0.955).toFixed(1));
   if (estSpeed < 45 || estSpeed > 158) return null;
@@ -76,10 +81,32 @@ function buildAutoPitchFallback(params: {
   const ey = last.y / videoHeight;
   const cx = Math.max(0, Math.min(1, (2 * mid.x) / videoWidth - (sx + ex) / 2));
   const cy = Math.max(0, Math.min(1, (2 * mid.y) / videoHeight - (sy + ey) / 2));
+  const behindPitcher = cameraAngle === 'behind_pitcher';
+  const lineMidX = (first.x + last.x) * 0.5;
+  const lineMidY = (first.y + last.y) * 0.5;
+  const pxToCm = 86 / Math.max(110, videoWidth * 0.2);
+  const signX = behindPitcher ? -1 : 1;
+  const horizontalBreakCm = Number(
+    Math.max(-58, Math.min(58, (mid.x - lineMidX) * pxToCm * signX * 1.8)).toFixed(1)
+  );
+  const flightSec = flightTimeMs / 1000;
+  const gravityDropCm = Math.min(72, 0.5 * 981 * flightSec * flightSec * 0.35);
+  const verticalBreakCm = Number(
+    Math.max(-58, Math.min(68, gravityDropCm - (mid.y - lineMidY) * pxToCm * 1.5)).toFixed(1)
+  );
+  const plateXCm = Number(Math.max(-42, Math.min(42, (ex - 0.48) * 140)).toFixed(1));
+  const plateYCm = Number(Math.max(25, Math.min(130, 76 - (ey - 0.50) * 120)).toFixed(1));
+  const metrics = buildSmartScoutMetrics({
+    speedKmh: estSpeed,
+    horizontalBreakCm,
+    verticalBreakCm,
+    plateXCm,
+    plateYCm,
+  });
   const pitchType =
     preferredPitchType && preferredPitchType !== '未標記'
       ? preferredPitchType
-      : '四縫線快速球';
+      : classifyPitchTypeFromTrajectory({ speedKmh: estSpeed, horizontalBreakCm, verticalBreakCm });
   const now = new Date();
   const recordedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
@@ -89,6 +116,19 @@ function buildAutoPitchFallback(params: {
     pitchColor: getPitchTypeColor(pitchType),
     cameraAngle,
     speedKmh: estSpeed,
+    plateSpeedKmh: metrics.plateSpeedKmh,
+    verticalBreakCm: metrics.verticalBreakCm,
+    horizontalBreakCm: metrics.horizontalBreakCm,
+    efficiencyPct: metrics.spinEfficiencyPct,
+    spinDirection: metrics.spinAxisClock,
+    spinAxisDeg: metrics.spinAxisDeg,
+    gyroDegree: Math.round(metrics.gyroAngleDeg),
+    activeSpinRpm: metrics.activeSpinRpm,
+    totalSpinRpm: metrics.spinRateRpm,
+    plateXCm: metrics.plateXCm,
+    plateYCm: metrics.plateYCm,
+    zoneId: metrics.zoneId,
+    isStrike: metrics.isStrike,
     measurement: {
       flightTimeMs,
       detectionCount: track.length,
@@ -98,12 +138,12 @@ function buildAutoPitchFallback(params: {
     ribbonPath: {
       startX: sx,
       startY: sy,
-      startR: cameraAngle === 'behind_pitcher' ? 22 : 5,
+      startR: behindPitcher ? 26 : 5.2,
       ctrlX: cx,
       ctrlY: cy,
       endX: ex,
       endY: ey,
-      endR: cameraAngle === 'behind_pitcher' ? 5 : 22,
+      endR: behindPitcher ? 4.8 : 26,
     },
   };
 }
@@ -969,11 +1009,48 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
 
     if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
     flushTimerRef.current = window.setTimeout(() => {
-      if (activeTrackRef.current.length >= 3) {
+      const buffered = [...activeTrackRef.current];
+      if (buffered.length >= 4 && video.videoWidth > 0 && video.videoHeight > 0) {
+        const autoRec =
+          computeRealPitchFromDetections({
+            detections: buffered,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            cameraAngle,
+            discipline,
+            distanceMeters,
+            checkpoints: manualCheckpoints,
+            preferredPitchType: selectedPitchType,
+            videoUrl: uploadedVideoUrl ?? undefined,
+          }) ??
+          buildAutoPitchFallback({
+            track: buffered,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            cameraAngle,
+            distanceMeters,
+            preferredPitchType: selectedPitchType,
+            videoUrl: uploadedVideoUrl ?? undefined,
+          });
+        if (autoRec) {
+          if (uploadedVideoUrl) measuredInFileRef.current += 1;
+          setDismissedPitchId(null);
+          onNewMeasuredPitch({
+            ...autoRec,
+            snapshotUrl: captureVideoSnapshot(),
+          });
+          setCaptureMessage('');
+          resetTrack();
+          setProgress(0.06);
+          setIsAnimatingRibbon(true);
+          return;
+        }
+      }
+      if (buffered.length >= 3) {
         setCaptureMessage('有偵測到球，但還無法確認出手與接球。可調整測速框後再試。');
       }
       resetTrack();
-    }, uploadedVideoUrl ? 500 : 180);
+    }, uploadedVideoUrl ? 350 : 200);
   }, [
     cameraAngle,
     captureVideoSnapshot,
@@ -1696,10 +1773,62 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
               </div>
             </div>
 
-            {displayPitch?.measurement && (
-              <p className="mt-2 text-xs text-neutral-300">
-                飛行 {Math.round(displayPitch.measurement.flightTimeMs)} ms · 偵測 {displayPitch.measurement.detectionCount} 幀
-              </p>
+            {displayPitch && (
+              <div className="mt-2.5 grid grid-cols-4 gap-x-2 gap-y-2 border-t border-white/10 pt-2.5 text-left">
+                <div>
+                  <div className="text-[10px] text-neutral-400">垂直變化量</div>
+                  <div className="text-sm font-bold tabular-nums">
+                    {displayPitch.verticalBreakCm !== undefined ? `${displayPitch.verticalBreakCm.toFixed(1)}` : '--'}
+                    <span className="ml-0.5 text-[10px] font-normal text-neutral-300">cm</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-neutral-400">水平變化量</div>
+                  <div className="text-sm font-bold tabular-nums">
+                    {displayPitch.horizontalBreakCm !== undefined ? `${displayPitch.horizontalBreakCm.toFixed(1)}` : '--'}
+                    <span className="ml-0.5 text-[10px] font-normal text-neutral-300">cm</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-neutral-400">轉速</div>
+                  <div className="text-sm font-bold tabular-nums">
+                    {displayPitch.totalSpinRpm ?? '--'}
+                    <span className="ml-0.5 text-[10px] font-normal text-neutral-300">rpm</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-neutral-400">有效轉速</div>
+                  <div className="text-sm font-bold tabular-nums">
+                    {displayPitch.activeSpinRpm ?? '--'}
+                    <span className="ml-0.5 text-[10px] font-normal text-neutral-300">rpm</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-neutral-400">效率</div>
+                  <div className="text-sm font-bold tabular-nums">
+                    {displayPitch.efficiencyPct ?? '--'}
+                    <span className="ml-0.5 text-[10px] font-normal text-neutral-300">%</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-neutral-400">旋轉方向</div>
+                  <div className="text-sm font-bold tabular-nums">
+                    {displayPitch.spinDirection ?? '--:--'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-neutral-400">陀螺角度</div>
+                  <div className="text-sm font-bold tabular-nums">
+                    {displayPitch.gyroDegree !== undefined ? `${displayPitch.gyroDegree}°` : '--'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-neutral-400">飛行 / 幀數</div>
+                  <div className="text-xs font-semibold text-neutral-200 tabular-nums">
+                    {displayPitch.measurement ? `${Math.round(displayPitch.measurement.flightTimeMs)}ms · ${displayPitch.measurement.detectionCount}幀` : '--'}
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         )}
