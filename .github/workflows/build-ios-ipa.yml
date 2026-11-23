@@ -24,7 +24,7 @@ jobs:
         run: |
           brew install xcodegen
           pip install --upgrade pip
-          pip install ultralytics coremltools
+          pip install "torch==2.5.1" "torchvision==0.20.1" "numpy<2" "coremltools==8.2" "ultralytics>=8.3.0"
 
       - name: Convert YOLO11n (.pt) to Apple Neural Engine CoreML (.mlpackage)
         run: |
@@ -38,7 +38,8 @@ jobs:
               raise FileNotFoundError(f"Missing {pt_path}")
 
           model = YOLO(str(pt_path))
-          exported = Path(model.export(format="coreml", imgsz=320, nms=False, half=True))
+          exported = Path(model.export(format="coreml", imgsz=320, nms=False))
+          print("Ultralytics returned:", exported, "exists:", exported.exists())
           dst = Path("ios-app/SmartScoutPro/Models/BaseballDetector.mlpackage")
           if dst.exists():
               shutil.rmtree(dst)
