@@ -261,8 +261,10 @@ export function computeRealPitchFromDetections(params: {
   const signX = behindPitcher ? -1 : 1;
   const rawHbCm = (mid.x - lineMidX) * pxToCm * signX * 1.8;
   const flightSec = flightTimeMs / 1000;
-  const gravityDropCm = Math.min(72, 0.5 * 981 * flightSec * flightSec * 0.35);
-  const rawVbCm = gravityDropCm - (mid.y - lineMidY) * pxToCm * 1.5;
+  // 精確重力拋物線弦高公式：(1/8)*g*t^2；平直快速球弧高小(IVB>0)，大曲球/指叉球彩虹弧高大(IVB<0)
+  const gravitySagCm = 0.125 * 981 * flightSec * flightSec;
+  const observedArcCm = (lineMidY - mid.y) * pxToCm * 1.6;
+  const rawVbCm = (gravitySagCm - observedArcCm) * 1.35 + 18;
 
   const horizontalBreakCm = Number(Math.max(-58, Math.min(58, rawHbCm)).toFixed(1));
   const verticalBreakCm = Number(Math.max(-58, Math.min(68, rawVbCm)).toFixed(1));

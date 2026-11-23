@@ -90,9 +90,10 @@ function buildAutoPitchFallback(params: {
     Math.max(-58, Math.min(58, (mid.x - lineMidX) * pxToCm * signX * 1.8)).toFixed(1)
   );
   const flightSec = flightTimeMs / 1000;
-  const gravityDropCm = Math.min(72, 0.5 * 981 * flightSec * flightSec * 0.35);
+  const gravitySagCm = 0.125 * 981 * flightSec * flightSec;
+  const observedArcCm = (lineMidY - mid.y) * pxToCm * 1.6;
   const verticalBreakCm = Number(
-    Math.max(-58, Math.min(68, gravityDropCm - (mid.y - lineMidY) * pxToCm * 1.5)).toFixed(1)
+    Math.max(-58, Math.min(68, (gravitySagCm - observedArcCm) * 1.35 + 18)).toFixed(1)
   );
   const plateXCm = Number(Math.max(-42, Math.min(42, (ex - 0.48) * 140)).toFixed(1));
   const plateYCm = Number(Math.max(25, Math.min(130, 76 - (ey - 0.50) * 120)).toFixed(1));
