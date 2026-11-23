@@ -3,8 +3,8 @@ import Foundation
 import Photos
 import SwiftUI
 
-/// Continuous 60fps/120fps rear camera + CoreML Apple Neural Engine ball tracker +
-/// seamless hardware H.264 auto-recording directly into iPhone Photos Library.
+/// Continuous 60fps rear camera + CoreML Apple Neural Engine 640px/320px ball tracker +
+/// static background noise suppression + seamless hardware H.264 auto-recording into iPhone Photos.
 final class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
 
@@ -18,6 +18,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var videoSize: CGSize = CGSize(width: 720, height: 1280)
 
     // User settings
+    @Published var modelMode: DetectorModelMode = .highRes640
     @Published var cameraAngle: CameraAngleMode = .behindPitcher
     @Published var distanceMeters: Double = 18.44
     @Published var autoSaveToPhotos: Bool = true
@@ -28,22 +29,39 @@ final class CameraManager: NSObject, ObservableObject {
     private let physics = PitchPhysicsEngine()
 
     private var activeTrack: [BallDetectionSample] = []
-    private var lastDetectionWallMs: Double = 0
     private var flushWorkItem: DispatchWorkItem?
     private var nextPitchNumber: Int = 1
+
+    // Rolling 90-frame static background pixel-bin suppressor (prevents lights/logos stealing the ball)
+    private var recentBinWindow: [Set<Int>] = []
+    private var binCounts: [Int: Int] = [:]
 
     // Rolling hardware H.264 AVAssetWriter segment recorder (never interrupts camera!)
     private var assetWriter: AVAssetWriter?
     private var writerInput: AVAssetWriterInput?
     private var currentSegmentUrl: URL?
-    private var segmentStartPts: CMTime?
     private var segmentStartedAt: Date = Date()
     private var isRotatingWriter = false
 
     override init() {
         super.init()
         self.isModelReady = detector.isReady
-        self.statusText = detector.isReady ? "60fps AI 待命中" : "尚未載入 CoreML 模型"
+        if !detector.hasModel(.highRes640) && detector.hasModel(.fast320) {
+            self.modelMode = .fast320
+        }
+        self.statusText = detector.isReady ? "60fps \(modelMode.label) 待命中" : "尚未載入 CoreML 模型"
+    }
+
+    func toggleModelMode() {
+        let target: DetectorModelMode = (modelMode == .highRes640) ? .fast320 : .highRes640
+        guard detector.hasModel(target) else { return }
+        modelMode = target
+        videoQueue.async { [weak self] in
+            self?.recentBinWindow.removeAll()
+            self?.binCounts.removeAll()
+            self?.activeTrack.removeAll()
+        }
+        statusText = "\(activeFps)fps \(target.label) 連續測速中"
     }
 
     func start() {
@@ -83,7 +101,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
         session.addInput(input)
 
-        // Lock highest clean 60fps (or 120fps) 720p/1080p format
         var chosenFormat: AVCaptureDevice.Format?
         var chosenFps: Double = 60.0
         for format in device.formats {
@@ -111,7 +128,7 @@ final class CameraManager: NSObject, ObservableObject {
                 }
                 device.unlockForConfiguration()
             } catch {
-                // fallback to default format
+                // fallback
             }
         }
 
@@ -135,7 +152,7 @@ final class CameraManager: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.activeFps = Int(chosenFps.rounded())
             self.isRunning = true
-            self.statusText = self.detector.isReady ? "\(self.activeFps)fps 連續測速待命中" : "相機已啟動（等待模型）"
+            self.statusText = self.detector.isReady ? "\(self.activeFps)fps \(self.modelMode.label) 連續測速待命中" : "相機已啟動（等待模型）"
         }
     }
 
@@ -168,7 +185,6 @@ final class CameraManager: NSObject, ObservableObject {
         self.assetWriter = writer
         self.writerInput = input
         self.currentSegmentUrl = url
-        self.segmentStartPts = pts
         self.segmentStartedAt = Date()
     }
 
@@ -178,7 +194,6 @@ final class CameraManager: NSObject, ObservableObject {
         if let input = writerInput, input.isReadyForMoreMediaData, assetWriter?.status == .writing {
             input.append(sampleBuffer)
         }
-        // Rotate every 6 seconds while idle so clips stay compact (~3-6s) and valid from byte 0
         if activeTrack.isEmpty && Date().timeIntervalSince(segmentStartedAt) >= 6.0 {
             finishCurrentSegment(saveToPhotos: false)
         }
@@ -193,7 +208,6 @@ final class CameraManager: NSObject, ObservableObject {
         assetWriter = nil
         writerInput = nil
         currentSegmentUrl = nil
-        segmentStartPts = nil
 
         if writer.status == .writing {
             writer.finishWriting { [weak self] in
@@ -230,62 +244,150 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Offline Video Import Analysis (60/120/240fps from Photos)
+    // MARK: - Static-Background Bin Suppressor & Trajectory Selector
+
+    private static func binKey(x: CGFloat, y: CGFloat) -> Int {
+        let bx = Int(x / 14.0)
+        let by = Int(y / 14.0)
+        return (bx & 0xFFFF) << 16 | (by & 0xFFFF)
+    }
+
+    private func updateLiveStaticBins(candidates: [BallDetectionSample]) {
+        var frameBins = Set<Int>()
+        for c in candidates {
+            frameBins.insert(Self.binKey(x: c.x, y: c.y))
+        }
+        recentBinWindow.append(frameBins)
+        for b in frameBins {
+            binCounts[b, default: 0] += 1
+        }
+        if recentBinWindow.count > 90 {
+            let old = recentBinWindow.removeFirst()
+            for b in old {
+                if let cnt = binCounts[b], cnt > 1 {
+                    binCounts[b] = cnt - 1
+                } else {
+                    binCounts.removeValue(forKey: b)
+                }
+            }
+        }
+    }
+
+    private func selectBestDynamicCandidate(
+        candidates: [BallDetectionSample],
+        staticCounts: [Int: Int],
+        track: [BallDetectionSample],
+        frameWidth: CGFloat,
+        primaryConf: Float
+    ) -> BallDetectionSample? {
+        let dynamic = candidates.filter { (staticCounts[Self.binKey(x: $0.x, y: $0.y)] ?? 0) < 6 }
+        guard !dynamic.isEmpty else { return nil }
+        let ts = dynamic[0].timestampMs
+        let inFlight = track.count >= 2 && (ts - track.last!.timestampMs) <= PitchPhysicsEngine.maxSampleGapMs
+        if inFlight {
+            let p1 = track[track.count - 2]
+            let p2 = track[track.count - 1]
+            let dtPrev = max(1.0, p2.timestampMs - p1.timestampMs)
+            let dtNow = ts - p2.timestampMs
+            let vx = (p2.x - p1.x) / CGFloat(dtPrev)
+            let vy = (p2.y - p1.y) / CGFloat(dtPrev)
+            let predX = p2.x + vx * CGFloat(dtNow)
+            let predY = p2.y + vy * CGFloat(dtNow)
+            let radius = max(46.0, frameWidth * 0.14)
+            let near = dynamic.filter { hypot($0.x - predX, $0.y - predY) <= radius }
+            if let closest = near.min(by: { hypot($0.x - predX, $0.y - predY) < hypot($1.x - predX, $1.y - predY) }) {
+                return closest
+            }
+        }
+        if !(track.count >= 4 && inFlight) {
+            return dynamic.first(where: { $0.confidence >= primaryConf })
+        }
+        return nil
+    }
+
+    // MARK: - Offline Video Import Analysis (Auto 640px -> 320px Fallback on Neural Engine)
 
     func analyzeImportedVideo(url: URL) {
+        let preferred = self.modelMode
         DispatchQueue.main.async {
-            self.statusText = "正在用 Apple Neural Engine 高速掃描影片..."
+            self.statusText = "正在用 Apple Neural Engine (\(preferred.label)) 高速掃描影片..."
             self.liveDots = []
         }
         videoQueue.async { [weak self] in
             guard let self else { return }
-            let asset = AVURLAsset(url: url)
-            guard let track = asset.tracks(withMediaType: .video).first,
-                  let reader = try? AVAssetReader(asset: asset) else {
-                DispatchQueue.main.async { self.statusText = "無法讀取該影片檔案" }
-                return
-            }
-            let output = AVAssetReaderTrackOutput(
-                track: track,
-                outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-            )
-            reader.add(output)
-            reader.startReading()
+            let modesToTry: [DetectorModelMode] = preferred == .highRes640 ? [.highRes640, .fast320] : [.fast320, .highRes640]
 
-            var detections: [BallDetectionSample] = []
-            var w: CGFloat = 720
-            var h: CGFloat = 1280
-            while let sb = output.copyNextSampleBuffer(),
-                  let pb = CMSampleBufferGetImageBuffer(sb) {
-                w = CGFloat(CVPixelBufferGetWidth(pb))
-                h = CGFloat(CVPixelBufferGetHeight(pb))
-                let tsMs = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb)) * 1000.0
-                if let det = self.detector.detect(pixelBuffer: pb, timestampMs: tsMs) {
-                    detections.append(det)
+            for mode in modesToTry where self.detector.hasModel(mode) {
+                let asset = AVURLAsset(url: url)
+                guard let track = asset.tracks(withMediaType: .video).first,
+                      let reader = try? AVAssetReader(asset: asset) else {
+                    continue
                 }
-            }
-            if let pitch = self.physics.finalizePitch(
-                detections: detections,
-                videoWidth: w,
-                videoHeight: h,
-                cameraAngle: self.cameraAngle,
-                distanceMeters: self.distanceMeters,
-                pitchNumber: self.nextPitchNumber
-            ) {
-                self.nextPitchNumber += 1
-                DispatchQueue.main.async {
-                    self.videoSize = CGSize(width: w, height: h)
-                    self.currentPitch = pitch
-                    self.pitchHistory.insert(pitch, at: 0)
-                    self.statusText = "影片測速完成：\(String(format: "%.1f", pitch.speedKmh)) km/h (\(pitch.pitchType))"
-                    if self.voiceAnnounce {
-                        self.physics.speakPitch(pitch)
+                let output = AVAssetReaderTrackOutput(
+                    track: track,
+                    outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+                )
+                reader.add(output)
+                reader.startReading()
+
+                var perFrame: [[BallDetectionSample]] = []
+                var counts: [Int: Int] = [:]
+                var w: CGFloat = 720
+                var h: CGFloat = 1280
+
+                while let sb = output.copyNextSampleBuffer(),
+                      let pb = CMSampleBufferGetImageBuffer(sb) {
+                    w = CGFloat(CVPixelBufferGetWidth(pb))
+                    h = CGFloat(CVPixelBufferGetHeight(pb))
+                    let tsMs = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb)) * 1000.0
+                    let cands = self.detector.detectTopK(pixelBuffer: pb, timestampMs: tsMs, mode: mode)
+                    perFrame.append(cands)
+                    var seen = Set<Int>()
+                    for c in cands {
+                        let k = Self.binKey(x: c.x, y: c.y)
+                        if seen.insert(k).inserted {
+                            counts[k, default: 0] += 1
+                        }
                     }
                 }
-            } else {
-                DispatchQueue.main.async {
-                    self.statusText = "影片掃描完成（偵測 \(detections.count) 幀），未構成完整投球軌跡"
+
+                var selected: [BallDetectionSample] = []
+                for cands in perFrame {
+                    if let hit = self.selectBestDynamicCandidate(
+                        candidates: cands,
+                        staticCounts: counts,
+                        track: selected,
+                        frameWidth: w,
+                        primaryConf: mode.defaultConfidence
+                    ) {
+                        selected.append(hit)
+                    }
                 }
+
+                if let pitch = self.physics.finalizePitch(
+                    detections: selected,
+                    videoWidth: w,
+                    videoHeight: h,
+                    cameraAngle: self.cameraAngle,
+                    distanceMeters: self.distanceMeters,
+                    pitchNumber: self.nextPitchNumber
+                ) {
+                    self.nextPitchNumber += 1
+                    DispatchQueue.main.async {
+                        self.videoSize = CGSize(width: w, height: h)
+                        self.currentPitch = pitch
+                        self.pitchHistory.insert(pitch, at: 0)
+                        self.statusText = "完成 (\(mode.label))：\(String(format: "%.1f", pitch.speedKmh)) km/h · \(pitch.pitchType)"
+                        if self.voiceAnnounce {
+                            self.physics.speakPitch(pitch)
+                        }
+                    }
+                    return
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.statusText = "影片掃描完成，未偵測到完整出手至接球軌跡"
             }
         }
     }
@@ -318,7 +420,7 @@ final class CameraManager: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.currentPitch = finalPitch
                     self.pitchHistory.insert(finalPitch, at: 0)
-                    self.statusText = saved ? "已自動存入 iPhone 相簿" : "\(self.activeFps)fps 連續測速中"
+                    self.statusText = saved ? "已自動存入 iPhone 相簿" : "\(self.activeFps)fps \(self.modelMode.label) 連續測速中"
                     if self.voiceAnnounce {
                         self.physics.speakPitch(finalPitch)
                     }
@@ -344,19 +446,25 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         appendToWriter(sampleBuffer, width: w, height: h)
 
-        guard let det = detector.detect(pixelBuffer: pb, timestampMs: tsMs) else { return }
+        let mode = self.modelMode
+        let cands = detector.detectTopK(pixelBuffer: pb, timestampMs: tsMs, mode: mode)
+        updateLiveStaticBins(candidates: cands)
+
+        guard let det = selectBestDynamicCandidate(
+            candidates: cands,
+            staticCounts: binCounts,
+            track: activeTrack,
+            frameWidth: CGFloat(w),
+            primaryConf: mode.defaultConfidence
+        ) else { return }
 
         if let prev = activeTrack.last {
             let gap = det.timestampMs - prev.timestampMs
-            let jump = hypot(det.x - prev.x, det.y - prev.y)
             if gap <= 0 || gap > PitchPhysicsEngine.maxSampleGapMs || det.timestampMs - activeTrack[0].timestampMs > 1600 {
                 activeTrack.removeAll()
-            } else if jump > CGFloat(w) * 0.22 {
-                return
             }
         }
         activeTrack.append(det)
-        lastDetectionWallMs = tsMs
 
         let normDots = activeTrack.map { CGPoint(x: $0.x / CGFloat(w), y: $0.y / CGFloat(h)) }
         DispatchQueue.main.async {

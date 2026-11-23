@@ -145,20 +145,24 @@ struct ContentView: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 8) {
-            Label("\(camera.activeFps) FPS · ANE", systemImage: "bolt.fill")
-                .font(.caption.weight(.bold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.62), in: Capsule())
-                .foregroundColor(camera.isModelReady ? .green : .orange)
+        HStack(spacing: 6) {
+            Button {
+                camera.toggleModelMode()
+            } label: {
+                Label(camera.modelMode.label, systemImage: "cpu.fill")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.66), in: Capsule())
+                    .foregroundColor(camera.modelMode == .highRes640 ? .yellow : .green)
+            }
 
             Button {
                 camera.cameraAngle = camera.cameraAngle == .behindPitcher ? .behindCatcher : .behindPitcher
             } label: {
                 Text(camera.cameraAngle.label)
                     .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 6)
                     .background(Color.black.opacity(0.62), in: Capsule())
             }

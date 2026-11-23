@@ -12,6 +12,7 @@ datasets/
 runs/
 *.pt
 !ios-app/SmartScoutPro/Models/ball_yolo11n.pt
+!ios-app/SmartScoutPro/Models/ball_yolo11s_640.pt
 
 # OS & Editor
 .DS_Store

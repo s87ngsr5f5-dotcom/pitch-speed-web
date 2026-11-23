@@ -26,25 +26,30 @@ jobs:
           pip install --upgrade pip
           pip install "torch==2.5.1" "torchvision==0.20.1" "numpy<2" "coremltools==8.2" "ultralytics>=8.3.0"
 
-      - name: Convert YOLO11n (.pt) to Apple Neural Engine CoreML (.mlpackage)
+      - name: Convert YOLO11s (640px) and YOLO11n (320px) to Apple Neural Engine CoreML (.mlpackage)
         run: |
           python3 - <<'EOF'
           from pathlib import Path
           import shutil
           from ultralytics import YOLO
 
-          pt_path = Path("ios-app/SmartScoutPro/Models/ball_yolo11n.pt")
-          if not pt_path.exists():
-              raise FileNotFoundError(f"Missing {pt_path}")
+          exports = [
+              ("ios-app/SmartScoutPro/Models/ball_yolo11s_640.pt", 640, "ios-app/SmartScoutPro/Models/BaseballDetector640.mlpackage"),
+              ("ios-app/SmartScoutPro/Models/ball_yolo11n.pt", 320, "ios-app/SmartScoutPro/Models/BaseballDetector.mlpackage"),
+          ]
 
-          model = YOLO(str(pt_path))
-          exported = Path(model.export(format="coreml", imgsz=320, nms=False))
-          print("Ultralytics returned:", exported, "exists:", exported.exists())
-          dst = Path("ios-app/SmartScoutPro/Models/BaseballDetector.mlpackage")
-          if dst.exists():
-              shutil.rmtree(dst)
-          shutil.move(str(exported), str(dst))
-          print("Successfully exported CoreML model to:", dst)
+          for src_str, imgsz, dst_str in exports:
+              pt_path = Path(src_str)
+              if not pt_path.exists():
+                  raise FileNotFoundError(f"Missing {pt_path}")
+              model = YOLO(str(pt_path))
+              exported = Path(model.export(format="coreml", imgsz=imgsz, nms=False))
+              print(f"Exported {src_str} @ {imgsz}px -> {exported} (exists={exported.exists()})")
+              dst = Path(dst_str)
+              if dst.exists():
+                  shutil.rmtree(dst)
+              shutil.move(str(exported), str(dst))
+              print("Installed CoreML package:", dst)
           EOF
 
       - name: Generate Xcode project with XcodeGen
