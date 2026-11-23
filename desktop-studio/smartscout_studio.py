@@ -28,6 +28,12 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from pitcher_pose_gate import PitcherPoseGate, ReleaseEvent
+except ImportError:
+    PitcherPoseGate = None  # type: ignore
+    ReleaseEvent = None  # type: ignore
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL_320 = REPO_ROOT / "public" / "models" / "ball_yolo11n.onnx"
 DEFAULT_MODEL_640 = Path(
@@ -212,6 +218,14 @@ def estimate_pitch_segments(
                 s += 1
             while e > s and depth_stat(e - 1):
                 e -= 1
+            # 濾除出手前拉臂／蓄力回擺幀，對齊真正出手瞬間
+            if e - s >= 5:
+                dir_x = pts[e][0] - pts[s][0]
+                dir_y = pts[e][1] - pts[s][1]
+                dir_len = math.hypot(dir_x, dir_y)
+                if dir_len >= 0.012:
+                    while e - s >= 5 and (steps[s][0] * dir_x + steps[s][1] * dir_y) / dir_len < -0.004:
+                        s += 1
             if e - s >= 5:
                 d_first, d_last = dets[s], dets[e]
                 s_sz = max(d_first.width, d_first.height)
@@ -566,6 +580,7 @@ def scan_video(
     distance_m: float,
     camera_angle: str,
     prefer_640: bool,
+    pose_gate: Optional["PitcherPoseGate"] = None,
 ) -> Tuple[List[Tuple[List[Detection], float, float]], float, int, int, str]:
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -578,6 +593,18 @@ def scan_video(
             break
         frames.append(fr)
     cap.release()
+
+    allowed_frames: Optional[set[int]] = None
+    if pose_gate is not None and frames:
+        _, release_events = pose_gate.analyze_frames(frames, fps, stride=1)
+        if release_events:
+            strong = [e for e in release_events if e.peak_score >= 3.5] or release_events
+            allowed_frames = set()
+            for ev in strong:
+                for f_i in range(ev.window_start_frame, ev.window_end_frame + 1):
+                    allowed_frames.add(f_i)
+            ev_summary = ", ".join(f"f{e.release_frame}({e.throwing_hand}HP)" for e in strong)
+            print(f"  [投手動作閘門] 鎖定出手窗口: {ev_summary}（準備期／抬腿期已鎖死不測速）", flush=True)
 
     order = []
     if prefer_640 and det_640 is not None:
@@ -592,7 +619,12 @@ def scan_video(
 
     for label, detector, thresh in order:
         per_frame_cands: List[List[Tuple[float, float, float, float, float]]] = [
-            detector.detect_topk(fr, conf_thresh=max(0.18, thresh - 0.08), max_k=6) for fr in frames
+            (
+                detector.detect_topk(fr, conf_thresh=max(0.18, thresh - 0.08), max_k=6)
+                if (allowed_frames is None or idx in allowed_frames)
+                else []
+            )
+            for idx, fr in enumerate(frames)
         ]
         # Build spatial grid to suppress static repeating background false positives (>= 6 frames in same 14px bin)
         grid_counts: dict[Tuple[int, int], int] = {}
@@ -656,6 +688,7 @@ def main():
     parser.add_argument("--angle", choices=["behind_pitcher", "behind_catcher"], default="behind_pitcher")
     parser.add_argument("--slowmo", type=float, default=1.0, help="Output speed multiplier (e.g. 0.5 for half-speed)")
     parser.add_argument("--prefer-640", action="store_true", help="Always try 640px high-res model first")
+    parser.add_argument("--no-pose-gate", action="store_true", help="Disable YOLO11n-pose pitcher release gate")
     parser.add_argument("--model320", default=str(DEFAULT_MODEL_320))
     parser.add_argument("--model640", default=str(DEFAULT_MODEL_640))
     args = parser.parse_args()
@@ -674,6 +707,7 @@ def main():
 
     det_320 = OnnxBallDetector(Path(args.model320)) if Path(args.model320).exists() else None
     det_640 = OnnxBallDetector(Path(args.model640)) if Path(args.model640).exists() else None
+    pose_gate = PitcherPoseGate() if (not args.no_pose_gate and PitcherPoseGate is not None) else None
     if det_320 is None and det_640 is None:
         print("錯誤：找不到任何 ONNX 棒球模型。", file=sys.stderr)
         sys.exit(1)
@@ -683,12 +717,12 @@ def main():
     all_results: List[PitchResult] = []
 
     print(f"=== SmartScout Desktop Studio | 共 {len(videos)} 支影片 ===")
-    print(f"可用模型: 320={'YES' if det_320 else 'NO'} | 640={'YES' if det_640 else 'NO'}\n")
+    print(f"可用模型: 320={'YES' if det_320 else 'NO'} | 640={'YES' if det_640 else 'NO'} | 投手動作閘門={'ON' if pose_gate else 'OFF'}\n")
 
     for vp in videos:
         print(f"[處理中] {vp.name} ...", flush=True)
         segs, fps, w, h, model_used = scan_video(
-            vp, det_320, det_640, args.distance, args.angle, args.prefer_640
+            vp, det_320, det_640, args.distance, args.angle, args.prefer_640, pose_gate=pose_gate
         )
         if not segs:
             print(f"  -> 未偵測到完整投球軌跡 ({vp.name})", flush=True)

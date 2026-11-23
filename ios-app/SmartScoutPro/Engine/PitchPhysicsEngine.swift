@@ -175,6 +175,23 @@ final class PitchPhysicsEngine {
                 var e = segEnd
                 while s < e && depthStationary(s) { s += 1 }
                 while e > s && depthStationary(e - 1) { e -= 1 }
+                // 濾除出手前拉臂／蓄力回擺幀，對齊真正出手瞬間
+                if e - s >= 4 {
+                    let dirX = Double(points[e].x - points[s].x)
+                    let dirY = Double(points[e].y - points[s].y)
+                    let dirLen = hypot(dirX, dirY)
+                    if dirLen >= 0.012 {
+                        while e - s >= 4 {
+                            let sx = Double(points[s + 1].x - points[s].x)
+                            let sy = Double(points[s + 1].y - points[s].y)
+                            if (sx * dirX + sy * dirY) / dirLen < -0.004 {
+                                s += 1
+                            } else {
+                                break
+                            }
+                        }
+                    }
+                }
                 if e - s >= 4 {
                     let firstDet = detections[s]
                     let lastDet = detections[e]
@@ -201,12 +218,30 @@ final class PitchPhysicsEngine {
             segStart = i + 1
         }
 
-        // Clean fallback when track itself is a single short valid flight
+        // Clean fallback: strictly verify real depth flight & forward consistency (reject held-in-hand windup!)
         if bestTrack == nil {
             let cleaned = cleanAndSmooth(detections, videoWidth: videoWidth)
-            if cleaned.count >= 4 {
-                let flightMs = cleaned.last!.timestampMs - cleaned.first!.timestampMs
-                if flightMs >= 360 && flightMs <= 880 {
+            if cleaned.count >= 5 {
+                let first = cleaned.first!
+                let last = cleaned.last!
+                let flightMs = last.timestampMs - first.timestampMs
+                let sSz = max(first.width, first.height)
+                let eSz = max(last.width, last.height)
+                let sizeRatio = max(sSz / max(1, eSz), eSz / max(1, sSz))
+                let fdx = last.x - first.x
+                let fdy = last.y - first.y
+                let fSpan = hypot(fdx, fdy)
+                var forwardSteps = 0
+                for i in 1..<cleaned.count {
+                    let sx = cleaned[i].x - cleaned[i - 1].x
+                    let sy = cleaned[i].y - cleaned[i - 1].y
+                    if sx * fdx + sy * fdy > 0 { forwardSteps += 1 }
+                }
+                let forwardRatio = Double(forwardSteps) / Double(max(1, cleaned.count - 1))
+                if flightMs >= 360 && flightMs <= 880 &&
+                    sizeRatio >= 1.28 &&
+                    fSpan >= min(videoWidth, videoHeight) * 0.04 &&
+                    forwardRatio >= 0.72 {
                     let spd = (flightDistance * 3600.0) / flightMs / 0.955
                     if spd >= 45 && spd <= 158 {
                         bestTrack = cleaned

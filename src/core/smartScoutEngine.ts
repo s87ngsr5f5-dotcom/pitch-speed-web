@@ -132,6 +132,17 @@ export function estimateAutomaticPitchFlight({
         let e = segEnd;
         while (s < e && depthStationary(s)) s++;
         while (e > s && depthStationary(e - 1)) e--;
+        // 濾除出手前拉臂／蓄力回擺幀：只要前段移動方向與整體出手→進壘方向相反，就往後推到真正出手瞬間
+        if (e - s >= 5) {
+          const dirX = points[e].x - points[s].x;
+          const dirY = points[e].y - points[s].y;
+          const dirLen = Math.hypot(dirX, dirY);
+          if (dirLen >= 0.012) {
+            while (e - s >= 5 && (steps[s].x * dirX + steps[s].y * dirY) / dirLen < -0.004) {
+              s++;
+            }
+          }
+        }
         if (e - s >= 5) {
           const firstDet = detections[s];
           const lastDet = detections[e];
