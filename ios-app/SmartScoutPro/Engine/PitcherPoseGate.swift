@@ -59,13 +59,30 @@ final class PitcherPoseGate {
         let ts: Double
     }
 
+    private struct HandState {
+        let wx: CGFloat
+        let wy: CGFloat
+        let torso: CGFloat
+        let speed: Double
+        let ts: Double
+    }
+
     private var samples: [Sample] = []
     private var lastJoints: Joints?
     private var lastJointsTs: Double = -1
     private var lastPoseTs: Double = -1_000_000
     private var lastPersonSeenTs: Double = -1_000_000
     private var lastPantsBox: PantsBox?
+    private var lastHand: HandState?
     private(set) var releases: [PoseReleaseEvent] = []
+
+    func isBallStillInHand(x: CGFloat, y: CGFloat, atMs ts: Double) -> Bool {
+        guard let h = lastHand, abs(ts - h.ts) <= 280 else { return false }
+        guard hypot(x - h.wx, y - h.wy) <= h.torso * 0.24 else { return false }
+        let recentRelease = releases.contains { ts >= $0.releaseMs - 80 && ts <= $0.releaseMs + 450 }
+        if recentRelease || h.speed >= 3.2 { return false }
+        return true
+    }
 
     func isInsidePitcherPants(x: CGFloat, y: CGFloat, atMs ts: Double, boxSize: CGFloat, trackCount: Int) -> Bool {
         guard let b = lastPantsBox, abs(ts - b.ts) <= 400 else { return false }
@@ -82,6 +99,7 @@ final class PitcherPoseGate {
         lastPoseTs = -1_000_000
         lastPersonSeenTs = -1_000_000
         lastPantsBox = nil
+        lastHand = nil
     }
 
     /// 每一幀呼叫；內部自動節流到 ~33Hz。
@@ -223,6 +241,15 @@ final class PitcherPoseGate {
         }
         lastJoints = j
         lastJointsTs = ts
+        if torso >= 48 {
+            if rs >= ls, let rw = j.rWrist {
+                lastHand = HandState(wx: rw.x, wy: rw.y, torso: torso, speed: rs, ts: ts)
+            } else if let lw = j.lWrist {
+                lastHand = HandState(wx: lw.x, wy: lw.y, torso: torso, speed: ls, ts: ts)
+            } else if let rw = j.rWrist {
+                lastHand = HandState(wx: rw.x, wy: rw.y, torso: torso, speed: rs, ts: ts)
+            }
+        }
         let lowerPts = [j.lHip, j.rHip, j.lKnee, j.rKnee, j.lAnkle, j.rAnkle].compactMap { $0 }
         if lowerPts.count >= 2, let h = hpY, torso >= 48 {
             let xs = lowerPts.map { $0.x }

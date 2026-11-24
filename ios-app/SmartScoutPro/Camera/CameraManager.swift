@@ -535,7 +535,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         }
         guard let det else { return }
-        // 屏蔽前景投手白球褲反光誤判
+        // 屏蔽前景投手白球褲反光誤判 & 手還沒投出去之前不開計
         if poseGate.isInsidePitcherPants(
             x: det.x,
             y: det.y,
@@ -543,6 +543,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             boxSize: max(det.width, det.height),
             trackCount: activeTrack.count
         ) { return }
+        if activeTrack.count < 2 && poseGate.isBallStillInHand(x: det.x, y: det.y, atMs: tsMs) {
+            return
+        }
 
         if let prev = activeTrack.last {
             let gap = det.timestampMs - prev.timestampMs

@@ -883,29 +883,66 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       ) {
         continue;
       }
+      // 2b. 手還沒真的把球投出去之前（球緊貼慢速手腕）絕不開始計時或畫線
+      if (
+        !region &&
+        activeTrackRef.current.length < 2 &&
+        poseGate?.isBallStillInHand(c.x, c.y, c.timestampMs)
+      ) {
+        continue;
+      }
       dynamicCands.push(c);
     }
     if (dynamicCands.length === 0) return;
 
-    // 3. 飛行中優先挑選最貼近「速度預測位置」的動態候選點（防止遠處閃光搶走真實棒球）
+    // 3. 飛行中嚴格鎖定「速度錐＋單向飛行走廊」（防止球突然跳去奇怪的地方或接球後回傳倒拉）
     const curTrack = activeTrackRef.current;
     let chosenBall = dynamicCands[0];
+    let hitGloveStop = false;
     if (curTrack.length >= 2) {
       const p1 = curTrack[curTrack.length - 2];
       const p2 = curTrack[curTrack.length - 1];
       const dtNow = primaryTs - p2.timestampMs;
       const dtPrev = Math.max(1, p2.timestampMs - p1.timestampMs);
       if (dtNow > 0 && dtNow <= 260) {
-        const predX = p2.x + ((p2.x - p1.x) / dtPrev) * dtNow;
-        const predY = p2.y + ((p2.y - p1.y) / dtPrev) * dtNow;
-        const radius = Math.max(54, video.videoWidth * 0.14);
-        const near = dynamicCands.filter((c) => Math.hypot(c.x - predX, c.y - predY) <= radius);
+        const vx = (p2.x - p1.x) / dtPrev;
+        const vy = (p2.y - p1.y) / dtPrev;
+        const speedPxPerMs = Math.hypot(vx, vy);
+        const predX = p2.x + vx * dtNow;
+        const predY = p2.y + vy * dtNow;
+        // 緊縮速度錐半徑：跟得上高速球，絕不亂跳去遠處雜訊
+        const radius = Math.max(36, Math.min(video.videoWidth * 0.095, speedPxPerMs * dtNow * 1.7 + 26));
+        const dirX = p2.x - curTrack[0].x;
+        const dirY = p2.y - curTrack[0].y;
+        const dirLen = Math.hypot(dirX, dirY);
+
+        const near = dynamicCands.filter((c) => {
+          if (Math.hypot(c.x - predX, c.y - predY) > radius) return false;
+          // 已有 >= 3 幀時禁止往反方向折返或大幅偏離主球路走廊
+          if (curTrack.length >= 3 && dirLen >= 18) {
+            const sx = c.x - p2.x;
+            const sy = c.y - p2.y;
+            const sLen = Math.hypot(sx, sy);
+            if (sLen > 6 && (sx * dirX + sy * dirY) / (sLen * dirLen) < -0.15) return false;
+            const perpDist = Math.abs((c.x - curTrack[0].x) * dirY - (c.y - curTrack[0].y) * dirX) / dirLen;
+            if (perpDist > Math.max(38, video.videoWidth * 0.065)) return false;
+          }
+          return true;
+        });
+
         if (near.length > 0) {
           chosenBall = near.reduce((best, c) =>
             Math.hypot(c.x - predX, c.y - predY) < Math.hypot(best.x - predX, best.y - predY) ? c : best,
           );
+          // 進手套即停偵測：飛行已 >= 320ms 且最後一步明顯驟停在手套內 -> 立刻結算，不收進手套後的回傳雜點
+          const prevStep = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+          const curStep = Math.hypot(chosenBall.x - p2.x, chosenBall.y - p2.y);
+          const elapsedFlight = chosenBall.timestampMs - curTrack[0].timestampMs;
+          if (curTrack.length >= 4 && elapsedFlight >= 320 && prevStep >= 8 && curStep <= Math.max(4, prevStep * 0.25)) {
+            hitGloveStop = true;
+          }
         } else if (curTrack.length >= 4) {
-          // 已在穩定飛行中但候選都在預測半徑外 -> 雜訊點，不破壞現有軌跡
+          // 已在穩定飛行中但候選都在速度錐外 -> 雜訊點，不破壞現有軌跡
           return;
         }
       }
@@ -935,7 +972,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       activeTrack.push(chosenBall);
     }
     if (uploadedVideoUrl) detectedInFileRef.current += 1;
-    setLiveTrackDots([...activeTrack]);
+    // 至少確認 2 幀連續飛行才畫出軌跡線，避免單幀零星點亂閃
+    if (activeTrack.length >= 2) {
+      setLiveTrackDots([...activeTrack]);
+    }
     if (manualCheckpoints) {
       const sample = activeTrack[activeTrack.length - 1];
       const samples = endpointSamplesRef.current.filter(
@@ -963,7 +1003,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       checkpoints: manualCheckpoints,
       preferredPitchType: selectedPitchType,
       videoUrl: uploadedVideoUrl ?? undefined,
-      isFinalized: false,
+      isFinalized: hitGloveStop,
     });
 
     if (record) {

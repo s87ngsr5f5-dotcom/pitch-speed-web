@@ -291,8 +291,13 @@ export function computeRealPitchFromDetections(params: {
   const now = new Date();
   const recordedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-  const ctrlX = Math.max(0, Math.min(1, 2 * mid.x / videoWidth - (startX + endX) / 2));
-  const ctrlY = Math.max(0, Math.min(1, 2 * mid.y / videoHeight - (startY + endY) / 2));
+  const chordMidX = (startX + endX) * 0.5;
+  const chordMidY = (startY + endY) * 0.5;
+  const rawCtrlX = (2 * mid.x) / videoWidth - chordMidX;
+  const rawCtrlY = (2 * mid.y) / videoHeight - chordMidY;
+  // 限制貝茲控制點偏移在合理棒球弧度內，避免單點抖動讓軌跡線往奇怪方向亂彎
+  const ctrlX = Math.max(0.02, Math.min(0.98, chordMidX + Math.max(-0.11, Math.min(0.11, rawCtrlX - chordMidX))));
+  const ctrlY = Math.max(0.02, Math.min(0.98, chordMidY + Math.max(-0.13, Math.min(0.13, rawCtrlY - chordMidY))));
   const normSpan = Math.max(
     Math.hypot(endX - startX, endY - startY),
     Math.hypot(mid.x / videoWidth - startX, mid.y / videoHeight - startY) * 1.6

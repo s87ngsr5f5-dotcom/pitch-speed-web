@@ -59,6 +59,7 @@ export class PitcherPoseGate {
   private lastKpTs = -1;
   private lastPersonSeenTs = -1_000_000;
   private lastPantsBox: { x1: number; y1: number; x2: number; y2: number; torso: number; ts: number } | null = null;
+  private lastHand: { wx: number; wy: number; torso: number; speed: number; ts: number } | null = null;
   releases: PoseReleaseEvent[] = [];
 
   reset(): void {
@@ -68,6 +69,22 @@ export class PitcherPoseGate {
     this.lastKpTs = -1;
     this.lastPersonSeenTs = -1_000_000;
     this.lastPantsBox = null;
+    this.lastHand = null;
+  }
+
+  /**
+   * 判斷球是否「還握在投手手上尚未投出」：
+   * 若偵測點緊貼投球手腕（<= 0.24 軀幹高度）且尚未偵測到出手峰值／手腕高速甩動，
+   * 回傳 true，阻止測速器在手把球投出去之前就提早開計或畫線。
+   */
+  isBallStillInHand(x: number, y: number, ts: number): boolean {
+    const h = this.lastHand;
+    if (!h || Math.abs(ts - h.ts) > 280) return false;
+    const dist = Math.hypot(x - h.wx, y - h.wy);
+    if (dist > h.torso * 0.24) return false;
+    const recentRelease = this.releases.some((r) => ts >= r.releaseMs - 80 && ts <= r.releaseMs + 450);
+    if (recentRelease || h.speed >= 3.2) return false;
+    return true;
   }
 
   /**
@@ -160,6 +177,18 @@ export class PitcherPoseGate {
     }
     this.lastKp = kp;
     this.lastKpTs = ts;
+    // 更新最新投球手腕位置（供「球還在手上不開計」判斷）
+    const useRight = rSpeed >= lSpeed ? ok(KP.R_WRIST) : !ok(KP.L_WRIST);
+    const wIdx = useRight ? KP.R_WRIST : KP.L_WRIST;
+    if (ok(wIdx) && torso >= 48) {
+      this.lastHand = {
+        wx: kp[wIdx][0],
+        wy: kp[wIdx][1],
+        torso,
+        speed: useRight ? rSpeed : lSpeed,
+        ts,
+      };
+    }
     // 更新前景投手球褲包圍盒（髖部到膝蓋／腳踝），供封殺白球褲誤報
     const lowerIds = [KP.L_HIP, KP.R_HIP, KP.L_KNEE, KP.R_KNEE, KP.L_ANKLE, KP.R_ANKLE].filter(ok);
     if (lowerIds.length >= 2 && hpY !== null && torso >= 48) {

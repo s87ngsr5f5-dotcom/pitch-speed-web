@@ -99,4 +99,14 @@ describe('PitcherPoseGate', () => {
     // 已進入飛行軌跡且為遠端小球（boxSize=12 < torso*0.14=28）：不誤殺進壘尾段
     expect(gate.isInsidePitcherPants(500, 700, 1050, 12, 5)).toBe(false);
   });
+
+  it('holds off starting measurement while ball is still in throwing hand, and opens once ball leaves hand', () => {
+    const gate = new PitcherPoseGate();
+    gate.ingest(pose([540, 560]), 1000);
+    gate.ingest(pose([542, 558]), 1033);
+    // 球還緊貼在靜止／慢速的投球手腕上 -> 擋下不開計
+    expect(gate.isBallStillInHand(545, 555, 1050)).toBe(true);
+    // 球已脫手飛離手腕 -> 放行開計
+    expect(gate.isBallStillInHand(460, 480, 1050)).toBe(false);
+  });
 });
