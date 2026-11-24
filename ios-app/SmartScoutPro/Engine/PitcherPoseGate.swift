@@ -91,7 +91,7 @@ final class PitcherPoseGate {
 
     /// 這個時間點是否允許開始 / 繼續測速
     func isMeasurementAllowed(atMs ts: Double) -> Bool {
-        if !isPoseAvailable(nearMs: ts) { return true }
+        if !isPoseAvailable(nearMs: ts) || releases.isEmpty { return true }
         return releases.contains { ts >= $0.releaseMs - Self.windowBeforeMs && ts <= $0.releaseMs + Self.windowAfterMs }
     }
 
@@ -100,11 +100,18 @@ final class PitcherPoseGate {
         return abs(ts - lastPersonSeenTs) <= 2000
     }
 
-    /// 只保留出手窗口內的球點（看不到投手時原樣返回）
+    /// 依出手事件裁切「出手前」準備期雜點，完整保留出手後進壘尾段；未捕捉到對應出手峰值時交由物理引擎把關
     func filter(_ detections: [BallDetectionSample]) -> [BallDetectionSample] {
-        guard let first = detections.first else { return detections }
-        if !isPoseAvailable(nearMs: first.timestampMs) { return detections }
-        return detections.filter { isMeasurementAllowed(atMs: $0.timestampMs) }
+        guard let first = detections.first, let last = detections.last, !releases.isEmpty else { return detections }
+        if !isPoseAvailable(nearMs: first.timestampMs) && !isPoseAvailable(nearMs: last.timestampMs) {
+            return detections
+        }
+        let matching = releases.filter {
+            $0.releaseMs >= first.timestampMs - 150 && $0.releaseMs <= last.timestampMs - 180
+        }
+        guard let rel = matching.last else { return detections }
+        let kept = detections.filter { $0.timestampMs >= rel.releaseMs - Self.windowBeforeMs }
+        return kept.count >= 4 ? kept : detections
     }
 
     // MARK: - Internals

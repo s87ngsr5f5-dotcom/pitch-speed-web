@@ -89,6 +89,12 @@ interface SmartScoutLiveCameraProps {
     width: number,
     height: number
   ) => void;
+  onPoseFrame?: (
+    bitmap: ImageBitmap,
+    timestampMs: number,
+    width: number,
+    height: number
+  ) => void;
   onScanFrame: (
     bitmap: ImageBitmap,
     timestampMs: number,
@@ -116,6 +122,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   onBackToSession,
   onDeletePitch,
   onFrame,
+  onPoseFrame,
   onScanFrame,
   onNewMeasuredPitch,
   onChangePitchType,
@@ -517,6 +524,18 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           bitmap.close();
           throw error;
         }
+        // 非阻塞送入獨立骨架 Worker（僅全畫面模式，完全不影響球體偵測 FPS）
+        if (onPoseFrame && !region) {
+          void createImageBitmap(video)
+            .then((poseBmp) => {
+              if (stopped || offset !== timestampOffset) {
+                poseBmp.close();
+                return;
+              }
+              onPoseFrame(poseBmp, timestampMs, w, h);
+            })
+            .catch(() => {});
+        }
       }).catch(() => {
         isBusyRef.current = false;
         if (!stopped) setCaptureMessage('無法擷取影片畫面。');
@@ -811,7 +830,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const betweenSamples = track.length
       ? latestBall.timestampMs - track[track.length - 1].timestampMs
       : 0;
-    if (track.length && (betweenSamples <= 0 || (!manualCheckpoints && betweenSamples > MAX_PITCH_SAMPLE_GAP_MS) ||
+    // 允許 WASM 偶發掉 1–2 幀（最高 260ms 間隔不斷軌），避免 5–9 幀真實飛行球被中途清空
+    const trackGapLimitMs = Math.max(MAX_PITCH_SAMPLE_GAP_MS, 260);
+    if (track.length && (betweenSamples <= 0 || (!manualCheckpoints && betweenSamples > trackGapLimitMs) ||
       latestBall.timestampMs - track[0].timestampMs > 1600)) {
       resetTrack();
     }

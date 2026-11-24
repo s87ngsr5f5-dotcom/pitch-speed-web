@@ -44,18 +44,19 @@ function feedPitch(gate: PitcherPoseGate, startMs: number) {
 }
 
 describe('PitcherPoseGate', () => {
-  it('blocks measurement during idle / windup and opens only after release', () => {
+  it('blocks pre-release windup frames once a release is detected, and does not wipe out tracks if no release fired', () => {
     const gate = new PitcherPoseGate();
     const t0 = feedIdle(gate, 0, 30);
     expect(gate.releases).toHaveLength(0);
-    expect(gate.isMeasurementAllowed(t0 - DT)).toBe(false);
+    // 未偵測到出手事件時不誤殺（交由物理軌跡過濾）
+    expect(gate.isMeasurementAllowed(t0 - DT)).toBe(true);
 
     const { releaseApprox } = feedPitch(gate, t0);
     expect(gate.releases).toHaveLength(1);
     const rel = gate.releases[0];
     expect(rel.throwingHand).toBe('R');
     expect(Math.abs(rel.releaseMs - releaseApprox)).toBeLessThanOrEqual(4 * DT);
-    // 出手前（抬腿期）不測速，出手後窗口內測速
+    // 偵測到出手後：出手前（抬腿期）不測速，出手後窗口內測速
     expect(gate.isMeasurementAllowed(t0 + 5 * DT)).toBe(false);
     expect(gate.isMeasurementAllowed(rel.releaseMs + 300)).toBe(true);
     expect(gate.isMeasurementAllowed(rel.releaseMs + 2000)).toBe(false);

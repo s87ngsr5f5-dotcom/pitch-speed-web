@@ -71,19 +71,34 @@ export class PitcherPoseGate {
   }
 
   isMeasurementAllowed(ts: number): boolean {
-    if (!this.isPoseAvailable(ts)) return true;
+    if (!this.isPoseAvailable(ts) || this.releases.length === 0) return true;
     return this.releases.some(
       (r) => ts >= r.releaseMs - PitcherPoseGate.WINDOW_BEFORE_MS && ts <= r.releaseMs + PitcherPoseGate.WINDOW_AFTER_MS,
     );
   }
 
-  /** 只保留出手窗口內的球點；看不到投手時原樣返回 */
+  /**
+   * 依出手事件裁切「出手前」準備期雜點：
+   * - 若有明確出手事件落在軌跡開頭附近或中段（[firstTs - 150ms, lastTs - 180ms]），
+   *   裁掉 releaseMs - 70ms 之前還握在手上的幀，並完整保留出手後的飛行軌跡（絕不切斷進壘尾段）。
+   * - 若看不到投手或該球未捕捉到對應出手峰值，交由物理軌跡引擎把關，絕不把真實飛行軌跡清空。
+   */
   filter<T extends { timestampMs: number }>(detections: T[]): T[] {
-    if (detections.length === 0) return detections;
-    if (!this.isPoseAvailable(detections[0].timestampMs) && !this.isPoseAvailable(detections[detections.length - 1].timestampMs)) {
+    if (detections.length === 0 || this.releases.length === 0) return detections;
+    const firstTs = detections[0].timestampMs;
+    const lastTs = detections[detections.length - 1].timestampMs;
+    if (!this.isPoseAvailable(firstTs) && !this.isPoseAvailable(lastTs)) {
       return detections;
     }
-    return detections.filter((d) => this.isMeasurementAllowed(d.timestampMs));
+    const matching = this.releases.filter(
+      (r) => r.releaseMs >= firstTs - 150 && r.releaseMs <= lastTs - 180,
+    );
+    if (matching.length === 0) return detections;
+    const rel = matching[matching.length - 1];
+    const kept = detections.filter(
+      (d) => d.timestampMs >= rel.releaseMs - PitcherPoseGate.WINDOW_BEFORE_MS,
+    );
+    return kept.length >= 4 ? kept : detections;
   }
 
   /** 每次骨架推論後呼叫；kp 為 null 表示這幀看不到投手 */

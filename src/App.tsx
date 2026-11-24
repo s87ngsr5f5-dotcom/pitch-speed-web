@@ -71,14 +71,16 @@ export function App() {
   const [actionConfidence, setActionConfidence] = useState<number>(0);
 
   const workerRef = useRef<Worker | null>(null);
+  const poseWorkerRef = useRef<Worker | null>(null);
+  const poseReadyRef = useRef<boolean>(false);
+  const poseBusyRef = useRef<boolean>(false);
   const isBusyRef = useRef<boolean>(false);
   const pendingScanResolveRef = useRef<((det: BallDetection | null) => void) | null>(null);
-  // 投手骨架出手閘門（與桌面 / iOS 同邏輯）：球還在手上時一律不測速
+  // 投手骨架出手閘門（獨立 Worker 非阻塞執行，絕不拖慢球體偵測）
   const poseGateRef = useRef(new PitcherPoseGate());
   const lastPoseRequestTsRef = useRef(-1_000_000);
   const lastPoseIngestTsRef = useRef(-1);
-  const shouldRequestPose = (timestampMs: number, minIntervalMs: number) => {
-    // 時間軸倒退 = 新影片 / 重新掃描，重置閘門
+  const shouldRequestPose = useCallback((timestampMs: number, minIntervalMs: number) => {
     if (timestampMs < lastPoseRequestTsRef.current - 100) {
       poseGateRef.current.reset();
       lastPoseIngestTsRef.current = -1;
@@ -87,7 +89,7 @@ export function App() {
     if (timestampMs - lastPoseRequestTsRef.current < minIntervalMs) return false;
     lastPoseRequestTsRef.current = timestampMs;
     return true;
-  };
+  }, []);
 
   const poseModelUrl = useMemo(
     () => new URL('./models/pitcher_pose_int8.onnx', window.location.href).href,
@@ -178,11 +180,6 @@ export function App() {
       } else if (msg.type === 'RESULT') {
         isBusyRef.current = false;
         setInferTimeMs(msg.inferTimeMs);
-        if (msg.pose !== undefined && typeof msg.timestampMs === 'number') {
-          if (msg.timestampMs < lastPoseIngestTsRef.current - 100) poseGateRef.current.reset();
-          lastPoseIngestTsRef.current = msg.timestampMs;
-          poseGateRef.current.ingest(msg.pose, msg.timestampMs);
-        }
         if (pendingScanResolveRef.current) {
           const resolve = pendingScanResolveRef.current;
           pendingScanResolveRef.current = null;
@@ -208,16 +205,45 @@ export function App() {
       type: 'INIT',
       modelUrl,
       actionModelUrl,
-      poseModelUrl,
       wasmPaths: new URL('./wasm/', window.location.href).href,
       inputSize: 320,
       confThreshold: 0.16,
     };
     worker.postMessage(initMsg);
 
+    // 獨立背景骨架 Worker（不同 CPU 核心執行，完全不阻塞球體偵測）
+    const poseWorker = new Worker(new URL('./workers/pose.worker.ts', import.meta.url), {
+      type: 'module',
+    });
+    poseWorkerRef.current = poseWorker;
+    poseReadyRef.current = false;
+    poseBusyRef.current = false;
+    poseWorker.onmessage = (ev: MessageEvent<{ type: string; timestampMs?: number; pose?: Array<[number, number, number]> | null }>) => {
+      const m = ev.data;
+      if (m.type === 'READY') {
+        poseReadyRef.current = true;
+      } else if (m.type === 'POSE_RESULT') {
+        poseBusyRef.current = false;
+        if (typeof m.timestampMs === 'number') {
+          if (m.timestampMs < lastPoseIngestTsRef.current - 100) poseGateRef.current.reset();
+          lastPoseIngestTsRef.current = m.timestampMs;
+          poseGateRef.current.ingest(m.pose ?? null, m.timestampMs);
+        }
+      }
+    };
+    poseWorker.postMessage({
+      type: 'INIT',
+      poseModelUrl,
+      wasmPaths: new URL('./wasm/', window.location.href).href,
+    });
+
     return () => {
       worker.terminate();
       workerRef.current = null;
+      poseWorker.terminate();
+      poseWorkerRef.current = null;
+      poseReadyRef.current = false;
+      poseBusyRef.current = false;
     };
   }, [modelUrl, actionModelUrl, poseModelUrl]);
 
@@ -237,8 +263,7 @@ export function App() {
             timestampMs,
             origWidth,
             origHeight,
-            detectAction: true,
-            detectPose: shouldRequestPose(timestampMs, 60),
+            detectAction: false,
           } satisfies WorkerInMessage,
           [bitmap]
         );
@@ -278,7 +303,6 @@ export function App() {
               origWidth,
               origHeight,
               detectAction: false,
-              detectPose: shouldRequestPose(timestampMs, 30),
             } satisfies WorkerInMessage,
             [bitmap]
           );
@@ -291,6 +315,24 @@ export function App() {
       });
     },
     []
+  );
+
+  const handlePoseFrame = useCallback(
+    (bitmap: ImageBitmap, timestampMs: number, origWidth: number, origHeight: number) => {
+      const pw = poseWorkerRef.current;
+      if (!pw || !poseReadyRef.current || poseBusyRef.current || !shouldRequestPose(timestampMs, 100)) {
+        bitmap.close();
+        return;
+      }
+      poseBusyRef.current = true;
+      try {
+        pw.postMessage({ type: 'POSE', bitmap, timestampMs, origWidth, origHeight }, [bitmap]);
+      } catch {
+        bitmap.close();
+        poseBusyRef.current = false;
+      }
+    },
+    [shouldRequestPose]
   );
 
   const handleNewMeasuredPitch = useCallback(
@@ -447,6 +489,7 @@ export function App() {
               }
             }}
             onFrame={handleFrame}
+            onPoseFrame={handlePoseFrame}
             onScanFrame={handleScanFrame}
             onNewMeasuredPitch={handleNewMeasuredPitch}
             onChangePitchType={(pitchId, newType) => {

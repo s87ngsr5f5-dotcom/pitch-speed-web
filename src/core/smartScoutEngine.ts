@@ -183,6 +183,79 @@ export function estimateAutomaticPitchFlight({
       segStart = i + 1;
     }
   }
+
+  // Finalized depth-flight fallback (mirrors iOS PitchPhysicsEngine):
+  // Handles 4+ frame flights when browser WASM drops 1–2 frames or ball vanishes into glove
+  // with sizeRatio 1.22–1.44, while strictly rejecting held-in-hand windup via depth + forward ratio.
+  if (isFinalized && detections.length >= 4) {
+    // 濾除單點飛點並保留時間連續的最後一段主軌跡（容許偶發掉幀至 260ms）
+    const fallbackGapMs = Math.max(MAX_PITCH_SAMPLE_GAP_MS * 1.4, 260);
+    const validRun: BallDetection[] = [detections[0]];
+    for (let i = 1; i < detections.length; i++) {
+      const prev = validRun[validRun.length - 1];
+      const curr = detections[i];
+      const dt = curr.timestampMs - prev.timestampMs;
+      const stepPx = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+      if (dt > 0 && dt <= fallbackGapMs && stepPx <= videoWidth * 0.28) {
+        validRun.push(curr);
+      } else if (validRun.length < 4) {
+        validRun.length = 0;
+        validRun.push(curr);
+      }
+    }
+    // 濾除出手前反方向回擺幀
+    let s = 0;
+    const e = validRun.length - 1;
+    if (e - s >= 3) {
+      const fdx = validRun[e].x - validRun[s].x;
+      const fdy = validRun[e].y - validRun[s].y;
+      const fLen = Math.hypot(fdx, fdy);
+      if (fLen >= Math.min(videoWidth, videoHeight) * 0.02) {
+        while (e - s >= 3) {
+          const sx = validRun[s + 1].x - validRun[s].x;
+          const sy = validRun[s + 1].y - validRun[s].y;
+          if ((sx * fdx + sy * fdy) / fLen < -videoWidth * 0.004) s++;
+          else break;
+        }
+      }
+    }
+    const track = validRun.slice(s, e + 1);
+    if (track.length >= 4) {
+      const first = track[0];
+      const last = track[track.length - 1];
+      const flightTimeMs = last.timestampMs - first.timestampMs;
+      const startSize = Math.max(first.width, first.height);
+      const endSize = Math.max(last.width, last.height);
+      const sizeRatio = Math.max(startSize / Math.max(1, endSize), endSize / Math.max(1, startSize));
+      const fdx = last.x - first.x;
+      const fdy = last.y - first.y;
+      const fSpan = Math.hypot(fdx, fdy);
+      let forwardSteps = 0;
+      for (let i = 1; i < track.length; i++) {
+        const sx = track[i].x - track[i - 1].x;
+        const sy = track[i].y - track[i - 1].y;
+        if (sx * fdx + sy * fdy > 0) forwardSteps++;
+      }
+      const forwardRatio = forwardSteps / Math.max(1, track.length - 1);
+      const speedKmh = (distance * 3600) / flightTimeMs / 0.955;
+      if (
+        flightTimeMs >= 320 &&
+        flightTimeMs <= 920 &&
+        sizeRatio >= 1.22 &&
+        fSpan >= Math.min(videoWidth, videoHeight) * 0.03 &&
+        forwardRatio >= 0.68 &&
+        speedKmh >= 45 &&
+        speedKmh <= 158
+      ) {
+        return {
+          track,
+          flightTimeMs: Number(flightTimeMs.toFixed(1)),
+          speedKmh: Number(speedKmh.toFixed(1)),
+          detectionCount: track.length,
+        };
+      }
+    }
+  }
   return null;
 }
 
