@@ -613,8 +613,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     if (!video || !uploadedVideoUrl || !isWorkerReady || discipline !== 'pitching') return;
 
     if (!autoReturnToCameraRef.current) {
-      // 以 0.25x 平滑慢動作播放（每幀間隔 133ms > WASM 50ms），確保全幀不掉幀且即時出軌跡與精準球速
-      video.playbackRate = 0.25;
+      // 正常 1.0x 原速流暢播放一次即完成測速與 3D 軌跡繪製
+      video.playbackRate = 1.0;
       setCaptureMessage('');
       void video.play().catch((error: DOMException) => {
         if (error.name !== 'AbortError') {
@@ -1066,7 +1066,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         setCaptureMessage('有偵測到球，但還無法確認出手與接球。可調整測速框後再試。');
       }
       resetTrack();
-    }, uploadedVideoUrl ? 750 : 200);
+    }, uploadedVideoUrl ? 260 : 200);
   }, [
     cameraAngle,
     captureVideoSnapshot,
@@ -1351,7 +1351,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         onLoadedMetadata={(event) => {
           const video = event.currentTarget;
           setFrameSize({ width: video.videoWidth, height: video.videoHeight });
-          video.playbackRate = uploadedVideoUrl ? 0.25 : 1;
+          video.playbackRate = 1.0;
         }}
         onResize={(event) => {
           const video = event.currentTarget;
