@@ -494,6 +494,22 @@ export function extractFlyingBallTrackFromFrames(
         );
         if (dtMs < 300 || dtMs > 900 || span < procWidth * 0.055) continue;
 
+        // Reject tracks that end on/inside the pitcher's own body/head (e.g. post-pitch walk-off or follow-through arm)
+        const endExcl = frames[trimmed[trimmed.length - 1].frameIdx]?.exclusion;
+        if (endExcl?.bodyBox) {
+          const bb = endExcl.bodyBox;
+          const bx0 = bb.x0 * toProcX;
+          const by0 = bb.y0 * toProcY;
+          const bx1 = bb.x1 * toProcX;
+          const by1 = bb.y1 * toProcY;
+          const bH = Math.max(20, by1 - by0);
+          const endNode = trimmed[trimmed.length - 1].blob;
+          // Extend upward by 0.25*bodyHeight to also cover pitcher's head/neck
+          if (endNode.x >= bx0 - bH * 0.12 && endNode.x <= bx1 + bH * 0.12 && endNode.y >= by0 - bH * 0.28 && endNode.y <= by1) {
+            continue;
+          }
+        }
+
         // Reject steep upward windup hand-raise trajectories
         const upwardRise = trimmed[0].blob.y - trimmed[trimmed.length - 1].blob.y;
         const horizSpan = Math.abs(trimmed[trimmed.length - 1].blob.x - trimmed[0].blob.x);

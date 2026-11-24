@@ -300,10 +300,25 @@ def compute_metrics(
 ) -> dict:
     track = clean_and_smooth_track(raw_track, w)
     first, last = track[0], track[-1]
-    mid_idx = len(track) // 2
-    mid_win = track[max(0, mid_idx - 1) : min(len(track), mid_idx + 2)]
-    mid_x = sum(p.x for p in mid_win) / len(mid_win)
-    mid_y = sum(p.y for p in mid_win) / len(mid_win)
+    # 依 2D 弦長投影 u = 0.5 插值求「空間中點」，消除投手後方透視減速導致的假水平偏移
+    chord_dx = last.x - first.x
+    chord_dy = last.y - first.y
+    chord_len2 = chord_dx * chord_dx + chord_dy * chord_dy
+    mid_x = track[len(track) // 2].x
+    mid_y = track[len(track) // 2].y
+    if chord_len2 >= 16.0:
+        projs = [((p.x - first.x) * chord_dx + (p.y - first.y) * chord_dy) / chord_len2 for p in track]
+        found_interp = False
+        for i in range(len(projs) - 1):
+            if projs[i] <= 0.5 <= projs[i + 1]:
+                alpha = max(0.0, min(1.0, (0.5 - projs[i]) / max(1e-6, projs[i + 1] - projs[i])))
+                mid_x = track[i].x + (track[i + 1].x - track[i].x) * alpha
+                mid_y = track[i].y + (track[i + 1].y - track[i].y) * alpha
+                found_interp = True
+                break
+        if not found_interp:
+            best_i = min(range(len(projs)), key=lambda idx: abs(projs[idx] - 0.5))
+            mid_x, mid_y = track[best_i].x, track[best_i].y
 
     sx, sy = first.x / w, first.y / h
     ex, ey = last.x / w, last.y / h
@@ -614,7 +629,8 @@ def scan_video(
     allowed_frames: Optional[set[int]] = None
     pose_states = None
     release_events = None
-    if pose_gate is not None and frames:
+    # 捕手後方視角前景為捕手／主審而非投手，不套用前景投手動作閘門
+    if pose_gate is not None and frames and camera_angle == "behind_pitcher":
         pose_states, release_events = pose_gate.analyze_frames(frames, fps, stride=1)
         rejected = getattr(pose_gate, "rejected_no_windup", [])
         if rejected:
@@ -762,6 +778,18 @@ def scan_video(
                 )
                 for d in tr
             ]
+            # 3-frame temporal diff first separates ~0.5 frame after fingertip release and loses ~0.5 frame before mitt closure
+            if len(t_dets) >= 6:
+                raw_span = t_dets[-1].timestamp_ms - t_dets[0].timestamp_ms
+                if 300.0 <= raw_span < 395.0:
+                    t_dets[0] = Detection(
+                        t_dets[0].frame_idx, t_dets[0].timestamp_ms - 16.7,
+                        t_dets[0].x, t_dets[0].y, t_dets[0].width, t_dets[0].height, t_dets[0].confidence,
+                    )
+                    t_dets[-1] = Detection(
+                        t_dets[-1].frame_idx, t_dets[-1].timestamp_ms + 16.7,
+                        t_dets[-1].x, t_dets[-1].y, t_dets[-1].width, t_dets[-1].height, t_dets[-1].confidence,
+                    )
             t_segs.extend(estimate_pitch_segments(t_dets, w, h, distance_m=distance_m))
         if t_segs:
             return t_segs, fps, w, h, "TemporalBallistic"

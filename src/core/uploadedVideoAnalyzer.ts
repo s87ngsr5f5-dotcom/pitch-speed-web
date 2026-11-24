@@ -174,7 +174,11 @@ export function pickPitchScanWindows(
     const mid = dur * 0.5;
     windows.push({ startSec: Math.max(0.05, mid - 1.5), endSec: Math.min(dur - 0.05, mid + 1.5), preferYolo: true });
   }
-  return windows.slice(0, 2);
+  // Keep YOLO-seeded windows first, and sort steady motion windows chronologically so the actual pitch
+  // is always analyzed before any post-pitch walk-off motion!
+  return windows
+    .slice(0, 2)
+    .sort((a, b) => (a.preferYolo === b.preferYolo ? a.startSec - b.startSec : a.preferYolo ? -1 : 1));
 }
 
 function isCorridorBall(det: BallDetection, vw: number, vh: number, hasRegion: boolean): boolean {
@@ -236,6 +240,7 @@ export interface SmartAnalyzeParams {
   videoUrl: string;
   durationSec: number;
   windows: ScanWindow[];
+  yoloSeedTimesSec?: number[];
   cameraAngle: 'behind_pitcher' | 'behind_catcher';
   discipline: 'pitching' | 'hitting';
   distanceMeters: number;
@@ -270,7 +275,9 @@ export async function analyzeUploadedPitchWindows(
 ): Promise<SmartAnalyzeResult | null> {
   const {
     videoUrl,
-    windows,
+    durationSec,
+    windows: initialWindows,
+    yoloSeedTimesSec = [],
     cameraAngle,
     discipline,
     distanceMeters,
@@ -284,7 +291,7 @@ export async function analyzeUploadedPitchWindows(
     onProgress,
   } = params;
 
-  if (windows.length === 0) return null;
+  if (initialWindows.length === 0 && !(durationSec > 0.4)) return null;
 
   const hidden = document.createElement('video');
   hidden.muted = true;
@@ -300,6 +307,61 @@ export async function analyzeUploadedPitchWindows(
     const origH = hidden.videoHeight;
     const stepSec = 1 / 30;
     const workCanvas = document.createElement('canvas');
+
+    // Deterministic 0.5s-spaced 1-frame-pair steady-activity probe for long clips (> 4.2s):
+    // 100% immune to slow-phone / high-CPU frame drops during 1.0x playback!
+    let windows = initialWindows;
+    if (durationSec > 4.2) {
+      const pScale = Math.min(1, 120 / Math.max(1, Math.min(origW, origH)));
+      const cpw = Math.max(48, Math.round(origW * pScale));
+      const cph = Math.max(48, Math.round(origH * pScale));
+      workCanvas.width = cpw;
+      workCanvas.height = cph;
+      const pCtx = workCanvas.getContext('2d', { willReadFrequently: true });
+      if (pCtx) {
+        const probed: ActivitySample[] = [];
+        const durCap = Math.min(durationSec, 30);
+        const readSmallGray = (): Uint8Array => {
+          pCtx.drawImage(hidden, 0, 0, cpw, cph);
+          const rgba = pCtx.getImageData(0, 0, cpw, cph).data;
+          const g = new Uint8Array(cpw * cph);
+          for (let p = 0, j = 0; p < g.length; p++, j += 4) {
+            g[p] = (rgba[j] * 77 + rgba[j + 1] * 150 + rgba[j + 2] * 29) >> 8;
+          }
+          return g;
+        };
+        const yMin = Math.floor(cph * 0.14);
+        const yMax = Math.ceil(cph * 0.78);
+        for (let t = 0.4; t <= durCap - 0.35; t += 0.5) {
+          if (isCancelled()) return null;
+          try {
+            await seekVideoTo(hidden, t);
+            const g1 = readSmallGray();
+            await seekVideoTo(hidden, Math.min(durCap - 0.05, t + 0.036));
+            const g2 = readSmallGray();
+            let total = 0, highDiff = 0, changed = 0, active = 0;
+            for (let y = 0; y < cph; y += 2) {
+              const row = y * cpw;
+              const inField = y >= yMin && y < yMax;
+              for (let x = 0; x < cpw; x += 2) {
+                const idx = row + x;
+                const d = Math.abs(g2[idx] - g1[idx]);
+                total++;
+                if (d > 4) highDiff++;
+                if (d >= 14) changed++;
+                if (inField && d >= 18) active++;
+              }
+            }
+            const isSteady = total > 0 && highDiff / total <= 0.5 && changed / total <= 0.14;
+            probed.push({ timeSec: t, energy: isSteady ? active / Math.max(1, total) : 0 });
+          } catch {
+            // ignore transient frame error
+          }
+        }
+        const detWins = pickPitchScanWindows(durationSec, probed, yoloSeedTimesSec);
+        if (detWins.length > 0) windows = detWins;
+      }
+    }
 
     // Pass 1: Zero-drop YOLO window scan (fast & radar-accurate on known/seed windows)
     for (const win of windows) {
@@ -451,8 +513,8 @@ export async function analyzeUploadedPitchWindows(
           if (motionFrames.length > 0 && isDuplicateGray(gray, motionFrames[motionFrames.length - 1].gray)) {
             continue;
           }
-          // Run zero-drop pose on every unique frame in the focused window so single-frame release peaks are never skipped
-          if (onScanPoseFrame && !region) {
+          // Run zero-drop pose on every unique frame for behind_pitcher view (behind_catcher foreground is catcher/umpire!)
+          if (onScanPoseFrame && !region && cameraAngle === 'behind_pitcher') {
             try {
               const pBmp = await createImageBitmap(workCanvas);
               const kp = await onScanPoseFrame(pBmp, tsMs, origW, origH);

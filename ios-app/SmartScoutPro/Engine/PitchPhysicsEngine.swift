@@ -253,7 +253,7 @@ final class PitchPhysicsEngine {
                     fSpan >= min(videoWidth, videoHeight) * 0.04 &&
                     forwardRatio >= 0.72 {
                     let spd = (flightDistance * 3600.0) / flightMs / 0.955
-                    if spd >= 45 && spd <= 158 {
+                    if spd >= 45 && spd <= 166 {
                         bestTrack = cleaned
                         bestFlightMs = (flightMs * 10).rounded() / 10
                         bestSpeed = (spd * 10).rounded() / 10
@@ -266,12 +266,36 @@ final class PitchPhysicsEngine {
         let track = cleanAndSmooth(rawTrack, videoWidth: videoWidth)
         let first = track.first!
         let last = track.last!
-        let midIdx = track.count / 2
-        let midLo = max(0, midIdx - 1)
-        let midHi = min(track.count - 1, midIdx + 1)
-        let midSlice = track[midLo...midHi]
-        let midX = midSlice.reduce(CGFloat(0)) { $0 + $1.x } / CGFloat(midSlice.count)
-        let midY = midSlice.reduce(CGFloat(0)) { $0 + $1.y } / CGFloat(midSlice.count)
+        // 依 2D 弦長投影 u = 0.5 插值求「空間中點」，消除投手後方透視減速導致的假水平偏移
+        let chordDx = last.x - first.x
+        let chordDy = last.y - first.y
+        let chordLen2 = chordDx * chordDx + chordDy * chordDy
+        var midX = track[track.count / 2].x
+        var midY = track[track.count / 2].y
+        if chordLen2 >= 16.0 {
+            let projs = track.map { (($0.x - first.x) * chordDx + ($0.y - first.y) * chordDy) / chordLen2 }
+            var foundInterp = false
+            for i in 0..<(projs.count - 1) {
+                if projs[i] <= 0.5 && projs[i + 1] >= 0.5 {
+                    let denom = max(CGFloat(1e-6), projs[i + 1] - projs[i])
+                    let alpha = max(0, min(1, (0.5 - projs[i]) / denom))
+                    midX = track[i].x + (track[i + 1].x - track[i].x) * alpha
+                    midY = track[i].y + (track[i + 1].y - track[i].y) * alpha
+                    foundInterp = true
+                    break
+                }
+            }
+            if !foundInterp {
+                var bestI = 0
+                var bestD = CGFloat.greatestFiniteMagnitude
+                for i in 0..<projs.count {
+                    let d = abs(projs[i] - 0.5)
+                    if d < bestD { bestD = d; bestI = i }
+                }
+                midX = track[bestI].x
+                midY = track[bestI].y
+            }
+        }
 
         let sx = first.x / videoWidth
         let sy = first.y / videoHeight

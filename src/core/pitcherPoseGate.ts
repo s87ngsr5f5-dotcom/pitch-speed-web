@@ -238,9 +238,10 @@ export class PitcherPoseGate {
         ts,
       };
     }
-    // 更新完整軀幹／下半身與雙手腕快照（供 3 幀差分引擎排除投手肢體／手套）
+    // 更新完整軀幹／下半身／非投球手肘與雙手腕快照（供 3 幀差分引擎排除投手肢體／手套）
+    const gElbow = useRight ? 7 : 8;
     const bodyIds = [
-      KP.L_SHOULDER, KP.R_SHOULDER, KP.L_HIP, KP.R_HIP,
+      KP.L_SHOULDER, KP.R_SHOULDER, gElbow, KP.L_HIP, KP.R_HIP,
       KP.L_KNEE, KP.R_KNEE, KP.L_ANKLE, KP.R_ANKLE,
     ].filter(ok);
     const gIdx = useRight ? KP.L_WRIST : KP.R_WRIST;

@@ -74,8 +74,9 @@ def _pitcher_exclusion_boxes(
     wrist_xy = (float(kp[w_idx, 0]) * sx, float(kp[w_idx, 1]) * sy) if kp[w_idx, 2] > 0.25 else None
     glove_xy = (float(kp[g_idx, 0]) * sx, float(kp[g_idx, 1]) * sy) if kp[g_idx, 2] > 0.25 else None
 
-    # Lower-body + torso core box (hips/knees/ankles + chest) to reject pants, cleats, jersey
-    body_pts = [(float(kp[k, 0]) * sx, float(kp[k, 1]) * sy) for k in (5, 6, 11, 12, 13, 14, 15, 16) if kp[k, 2] > 0.25]
+    # Lower-body + torso + non-throwing elbow box to reject pants, cleats, jersey, and glove-side arm
+    g_elbow = 7 if hand == "R" else 8
+    body_pts = [(float(kp[k, 0]) * sx, float(kp[k, 1]) * sy) for k in (5, 6, g_elbow, 11, 12, 13, 14, 15, 16) if kp[k, 2] > 0.25]
     if len(body_pts) < 3:
         return None, wrist_xy, glove_xy, torso
 
@@ -428,6 +429,18 @@ def extract_temporal_ball_tracks(
                     continue
                 if span < proc_w * 0.055:
                     continue
+
+                # Reject tracks that end on/inside the pitcher's own body/head (e.g. follow-through arm or walk-off)
+                if pose_states is not None:
+                    end_f = track[-1][0]
+                    if 0 <= end_f < len(pose_states):
+                        e_box, _, _, _ = _pitcher_exclusion_boxes(pose_states[end_f], proc_w, proc_h, orig_w, orig_h)
+                        if e_box is not None:
+                            bx0, by0, bx1, by1 = e_box
+                            bh = max(20.0, by1 - by0)
+                            ex_p, ey_p = track[-1][2].x, track[-1][2].y
+                            if bx0 - bh * 0.12 <= ex_p <= bx1 + bh * 0.12 and by0 - bh * 0.28 <= ey_p <= by1:
+                                continue
 
                 # Reject steep upward windup hand-raise trajectories (pitches fly forward/downward under gravity)
                 upward_rise = track[0][2].y - track[-1][2].y

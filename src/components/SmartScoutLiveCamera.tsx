@@ -1459,6 +1459,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
                 videoUrl: uploadedVideoUrl,
                 durationSec: video.duration,
                 windows,
+                yoloSeedTimesSec: [...yoloSeedTimesRef.current],
                 cameraAngle,
                 discipline,
                 distanceMeters,

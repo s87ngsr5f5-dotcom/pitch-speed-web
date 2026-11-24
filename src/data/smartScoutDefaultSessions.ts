@@ -243,12 +243,42 @@ export function computeRealPitchFromDetections(params: {
   const track = cleanAndSmoothTrajectory(rawTrack, videoWidth);
   const first = track[0];
   const last = track[track.length - 1];
-  const midIdx = Math.floor(track.length / 2);
-  const midWindow = track.slice(Math.max(0, midIdx - 1), Math.min(track.length, midIdx + 2));
-  const mid = {
-    x: midWindow.reduce((s, p) => s + p.x, 0) / midWindow.length,
-    y: midWindow.reduce((s, p) => s + p.y, 0) / midWindow.length,
+  // 依 2D 弦長投影 u = 0.5 插值求「空間中點」，徹底消除投手後方透視減速把時間中點拉向本壘造成的假水平變化量
+  const chordDx = last.x - first.x;
+  const chordDy = last.y - first.y;
+  const chordLen2 = chordDx * chordDx + chordDy * chordDy;
+  let mid = {
+    x: track[Math.floor(track.length / 2)].x,
+    y: track[Math.floor(track.length / 2)].y,
   };
+  if (chordLen2 >= 16) {
+    const projs = track.map((p) => ((p.x - first.x) * chordDx + (p.y - first.y) * chordDy) / chordLen2);
+    let foundInterp = false;
+    for (let i = 0; i < projs.length - 1; i++) {
+      if (projs[i] <= 0.5 && projs[i + 1] >= 0.5) {
+        const denom = Math.max(1e-6, projs[i + 1] - projs[i]);
+        const alpha = Math.max(0, Math.min(1, (0.5 - projs[i]) / denom));
+        mid = {
+          x: track[i].x + (track[i + 1].x - track[i].x) * alpha,
+          y: track[i].y + (track[i + 1].y - track[i].y) * alpha,
+        };
+        foundInterp = true;
+        break;
+      }
+    }
+    if (!foundInterp) {
+      let bestI = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < projs.length; i++) {
+        const d = Math.abs(projs[i] - 0.5);
+        if (d < bestDist) {
+          bestDist = d;
+          bestI = i;
+        }
+      }
+      mid = { x: track[bestI].x, y: track[bestI].y };
+    }
+  }
   const startX = first.x / videoWidth;
   const startY = first.y / videoHeight;
   const endX = last.x / videoWidth;
