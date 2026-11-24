@@ -152,7 +152,7 @@ final class PitchPhysicsEngine {
             let dx = Double(points[i + 1].x - points[i].x)
             let dy = Double(points[i + 1].y - points[i].y)
             let valid = dt > 0 && dt <= Self.maxSampleGapMs &&
-                detections[i].confidence >= 0.18 && detections[i + 1].confidence >= 0.18
+                detections[i].confidence >= 0.12 && detections[i + 1].confidence >= 0.12
             let rate = dt > 0 ? hypot(dx, dy) / dt : 0.0
             steps.append(StepInfo(dt: dt, valid: valid, rate: rate))
         }

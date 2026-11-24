@@ -149,53 +149,65 @@ function preprocess(
   };
 }
 
-function parseBestBall(
+function parseTopKBalls(
   output: ort.Tensor,
   origWidth: number,
   origHeight: number,
   timestampMs: number,
   { padX, padY, drawWidth, drawHeight, srcX, srcY, srcW, srcH, bitmapW, bitmapH }: ReturnType<typeof preprocess>,
-  thresholdOverride?: number
-): BallDetection | null {
+  thresholdOverride?: number,
+  maxK = 6
+): BallDetection[] {
   const data = output.data as Float32Array;
   const channels = output.dims[1];
   const anchors = output.dims[2];
   const numClasses = channels - 4;
   const targetClassIdx = numClasses === 1 ? 0 : 32; // 自訓單類別=0, COCO預訓練=32(sports ball)
-  if (targetClassIdx >= numClasses) return null;
+  if (targetClassIdx >= numClasses) return [];
 
   const offset = (4 + targetClassIdx) * anchors;
-  let bestScore = thresholdOverride ?? confThreshold;
-  let bestIdx = -1;
+  const minScore = thresholdOverride ?? confThreshold;
+  const raw: Array<{ idx: number; score: number }> = [];
 
   for (let i = 0; i < anchors; i++) {
     const score = data[offset + i];
+    if (score <= minScore) continue;
     const x = data[i];
     const y = data[anchors + i];
     if (
-      score > bestScore &&
       x >= padX && x < padX + drawWidth &&
       y >= padY && y < padY + drawHeight &&
       data[2 * anchors + i] > 0 && data[3 * anchors + i] > 0
     ) {
-      bestScore = score;
-      bestIdx = i;
+      raw.push({ idx: i, score });
     }
   }
-  if (bestIdx === -1) return null;
+  if (raw.length === 0) return [];
+  raw.sort((a, b) => b.score - a.score);
 
   const mapX = origWidth / bitmapW;
   const mapY = origHeight / bitmapH;
   const cropScaleX = srcW / drawWidth;
   const cropScaleY = srcH / drawHeight;
-  return {
-    x: (srcX + (data[bestIdx] - padX) * cropScaleX) * mapX,
-    y: (srcY + (data[anchors + bestIdx] - padY) * cropScaleY) * mapY,
-    width: data[2 * anchors + bestIdx] * cropScaleX * mapX,
-    height: data[3 * anchors + bestIdx] * cropScaleY * mapY,
-    confidence: bestScore,
-    timestampMs,
-  };
+  const nmsDist = Math.max(16, origWidth * 0.028);
+  const picked: BallDetection[] = [];
+
+  for (const item of raw) {
+    const idx = item.idx;
+    const x = (srcX + (data[idx] - padX) * cropScaleX) * mapX;
+    const y = (srcY + (data[anchors + idx] - padY) * cropScaleY) * mapY;
+    if (picked.some((p) => Math.hypot(p.x - x, p.y - y) < nmsDist)) continue;
+    picked.push({
+      x,
+      y,
+      width: data[2 * anchors + idx] * cropScaleX * mapX,
+      height: data[3 * anchors + idx] * cropScaleY * mapY,
+      confidence: item.score,
+      timestampMs,
+    });
+    if (picked.length >= maxK) break;
+  }
+  return picked;
 }
 
 async function inferActionPhase(
@@ -254,15 +266,21 @@ workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
         if (!session) throw new Error('ONNX model is not ready');
         const frame = preprocess(msg.bitmap);
         const results = await session.run({ [session.inputNames[0]]: frame.tensor });
-        let detection = parseBestBall(
+        const candidates = parseTopKBalls(
           results[session.outputNames[0]],
           msg.origWidth,
           msg.origHeight,
           msg.timestampMs,
           frame,
         );
-        // 球飛向本壘變小（4–8px）被全畫面漏掉時，自動以預測落點做 2.8x 局部放大補抓
-        if (!detection && msg.predictedRoi) {
+        let detection: BallDetection | null = candidates[0] ?? null;
+        // 球飛向本壘變小（4–8px）被全畫面漏掉（或預測落點附近無候選）時，自動以預測落點做 2.8x 局部放大補抓
+        const hasNearPred =
+          msg.predictedRoi &&
+          candidates.some(
+            (c) => Math.hypot(c.x - msg.predictedRoi!.x, c.y - msg.predictedRoi!.y) <= msg.predictedRoi!.radius,
+          );
+        if (msg.predictedRoi && !hasNearPred) {
           const toBmpX = msg.bitmap.width / Math.max(1, msg.origWidth);
           const toBmpY = msg.bitmap.height / Math.max(1, msg.origHeight);
           const side = Math.max(160, Math.round(Math.min(msg.bitmap.width, msg.bitmap.height) * 0.36));
@@ -277,25 +295,27 @@ workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
             srcH: Math.min(side, msg.bitmap.height - srcY),
           });
           const roiResults = await session.run({ [session.inputNames[0]]: roiFrame.tensor });
-          const roiDet = parseBestBall(
+          const roiHits = parseTopKBalls(
             roiResults[session.outputNames[0]],
             msg.origWidth,
             msg.origHeight,
             msg.timestampMs,
             roiFrame,
             Math.max(0.11, confThreshold - 0.05),
+            3,
+          ).filter(
+            (c) => Math.hypot(c.x - msg.predictedRoi!.x, c.y - msg.predictedRoi!.y) <= msg.predictedRoi!.radius,
           );
-          if (
-            roiDet &&
-            Math.hypot(roiDet.x - msg.predictedRoi.x, roiDet.y - msg.predictedRoi.y) <= msg.predictedRoi.radius
-          ) {
-            detection = roiDet;
+          if (roiHits.length > 0) {
+            candidates.push(...roiHits);
+            if (!detection) detection = roiHits[0];
           }
         }
         const action = msg.detectAction ? await inferActionPhase(msg.bitmap) : null;
         workerScope.postMessage({
           type: 'RESULT',
           detection,
+          candidates,
           inferTimeMs: Number((performance.now() - start).toFixed(1)),
           actionPhase: action?.actionPhase,
           actionConfidence: action?.actionConfidence,

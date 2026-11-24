@@ -153,6 +153,8 @@ export type WorkerOutMessage =
   | {
       type: 'RESULT';
       detection: BallDetection | null;
+      /** Top-K 候選球點（已做 NMS），供前端濾掉燈光／球褲後仍可撿回真實飛行棒球 */
+      candidates?: BallDetection[];
       inferTimeMs: number;
       actionPhase?: PitchActionPhase;
       actionConfidence?: number;

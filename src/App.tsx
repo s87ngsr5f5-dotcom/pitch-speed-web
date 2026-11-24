@@ -67,6 +67,7 @@ export function App() {
   const [backend, setBackend] = useState<string>('');
   const [inferTimeMs, setInferTimeMs] = useState<number>(0);
   const [latestBall, setLatestBall] = useState<BallDetection | null>(null);
+  const [latestCandidates, setLatestCandidates] = useState<BallDetection[]>([]);
   const [actionPhase, setActionPhase] = useState<PitchActionPhase>('idle');
   const [actionConfidence, setActionConfidence] = useState<number>(0);
 
@@ -186,6 +187,7 @@ export function App() {
           resolve(msg.detection);
         } else {
           setLatestBall(msg.detection);
+          setLatestCandidates(msg.candidates ?? (msg.detection ? [msg.detection] : []));
           if (msg.actionPhase) {
             setActionPhase(msg.actionPhase);
             setActionConfidence(msg.actionConfidence ?? 0);
@@ -486,6 +488,7 @@ export function App() {
             workerError={workerError}
             isBusyRef={isBusyRef}
             latestBall={latestBall}
+            latestCandidates={latestCandidates}
             poseGate={poseGateRef.current}
             actionPhase={actionPhase}
             actionConfidence={actionConfidence}

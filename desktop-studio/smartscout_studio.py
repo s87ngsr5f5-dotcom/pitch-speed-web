@@ -196,8 +196,8 @@ def estimate_pitch_segments(
         valid = (
             0 < dt <= MAX_PITCH_SAMPLE_GAP_MS
             and step_px <= w * 0.22
-            and dets[i].confidence >= 0.22
-            and dets[i + 1].confidence >= 0.22
+            and dets[i].confidence >= 0.12
+            and dets[i + 1].confidence >= 0.12
         )
         rate = math.hypot(dx, dy) / dt if dt > 0 else 0.0
         steps.append((dx, dy, dt, valid, rate))
@@ -240,8 +240,10 @@ def estimate_pitch_segments(
                 flight_ms = d_last.timestamp_ms - d_first.timestamp_ms - rel_pad - cat_pad
                 if 320.0 <= flight_ms <= 920.0:
                     spd = (flight_dist * 3600.0) / flight_ms / 0.955
-                    if (is_depth or is_oblique) and has_end_stop and 45.0 <= spd <= 165.0:
-                        found.append((dets[s : e + 1], round(flight_ms, 1), round(spd, 1)))
+                    seg_dets = dets[s : e + 1]
+                    mean_conf = sum(d.confidence for d in seg_dets) / max(1, len(seg_dets))
+                    if (is_depth or is_oblique) and has_end_stop and mean_conf >= 0.24 and 45.0 <= spd <= 165.0:
+                        found.append((seg_dets, round(flight_ms, 1), round(spd, 1)))
         seg_start = i + 1
     return found
 

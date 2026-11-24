@@ -81,6 +81,8 @@ interface SmartScoutLiveCameraProps {
   workerError?: string;
   isBusyRef: React.MutableRefObject<boolean>;
   latestBall: BallDetection | null;
+  /** Top-K 候選球點，供前端濾除燈光／球褲後依速度預測挑選真實棒球 */
+  latestCandidates?: BallDetection[];
   /** 投手骨架出手閘門：只有投手真正出手後的球點才會被拿去測速 */
   poseGate?: PitcherPoseGate;
   actionPhase?: PitchActionPhase;
@@ -121,6 +123,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   workerError,
   isBusyRef,
   latestBall,
+  latestCandidates = [],
   poseGate,
   actionPhase = 'idle',
   actionConfidence = 0,
@@ -845,53 +848,77 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   }, [actionConfidence, actionPhase, currentPitch, hasLiveCamera, isWorkerReady, uploadedVideoUrl]);
 
   useEffect(() => {
-    if (!latestBall || !sentTimestampsRef.current.delete(latestBall.timestampMs)) return;
+    const rawCands = latestCandidates.length > 0 ? latestCandidates : latestBall ? [latestBall] : [];
+    const primaryTs = rawCands[0]?.timestampMs;
+    if (primaryTs === undefined || !sentTimestampsRef.current.delete(primaryTs)) return;
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return;
-    if (!isFlightCorridorBall(latestBall, video.videoWidth, video.videoHeight, Boolean(region))) {
-      return;
-    }
 
-    // 1. 靜態燈光／看板抑制（14px 格點，90 幀滑動視窗內重複 >= 5 次直接封殺）
-    const binKey = (Math.floor(latestBall.x / 14) << 16) | (Math.floor(latestBall.y / 14) & 0xffff);
+    // 1. 更新 90 幀滾動靜態背景抑制器（14px 格點），同一固定位置反覆亮 >= 5 次一律判為燈光／招牌
     const binWin = staticBinWindowRef.current;
     const binMap = staticBinCountsRef.current;
-    const prevCount = binMap.get(binKey) ?? 0;
-    binMap.set(binKey, prevCount + 1);
-    binWin.push(binKey);
-    if (binWin.length > 90) {
-      const oldest = binWin.shift()!;
-      const c = (binMap.get(oldest) ?? 1) - 1;
-      if (c <= 0) binMap.delete(oldest);
-      else binMap.set(oldest, c);
+    const seenBins = new Set<number>();
+    const dynamicCands: BallDetection[] = [];
+    for (const c of rawCands) {
+      if (!isFlightCorridorBall(c, video.videoWidth, video.videoHeight, Boolean(region))) continue;
+      const binKey = (Math.floor(c.x / 14) << 16) | (Math.floor(c.y / 14) & 0xffff);
+      const prevCount = binMap.get(binKey) ?? 0;
+      if (!seenBins.has(binKey)) {
+        seenBins.add(binKey);
+        binMap.set(binKey, prevCount + 1);
+        binWin.push(binKey);
+        if (binWin.length > 90) {
+          const oldest = binWin.shift()!;
+          const cnt = (binMap.get(oldest) ?? 1) - 1;
+          if (cnt <= 0) binMap.delete(oldest);
+          else binMap.set(oldest, cnt);
+        }
+      }
+      if (prevCount >= 5) continue;
+      // 2. 前景投手球褲骨架屏蔽（球褲／膝蓋／白鞋反光絕不啟動假軌跡）
+      const detSize = Math.max(c.width, c.height);
+      if (
+        !region &&
+        poseGate?.isInsidePitcherPants(c.x, c.y, c.timestampMs, detSize, activeTrackRef.current.length)
+      ) {
+        continue;
+      }
+      dynamicCands.push(c);
     }
-    if (prevCount >= 5) {
-      return;
-    }
+    if (dynamicCands.length === 0) return;
 
-    // 2. 前景投手球褲骨架屏蔽（球褲／膝蓋／白鞋反光絕不啟動假軌跡）
-    const detSize = Math.max(latestBall.width, latestBall.height);
-    if (
-      !region &&
-      poseGate?.isInsidePitcherPants(
-        latestBall.x,
-        latestBall.y,
-        latestBall.timestampMs,
-        detSize,
-        activeTrackRef.current.length,
-      )
-    ) {
-      return;
+    // 3. 飛行中優先挑選最貼近「速度預測位置」的動態候選點（防止遠處閃光搶走真實棒球）
+    const curTrack = activeTrackRef.current;
+    let chosenBall = dynamicCands[0];
+    if (curTrack.length >= 2) {
+      const p1 = curTrack[curTrack.length - 2];
+      const p2 = curTrack[curTrack.length - 1];
+      const dtNow = primaryTs - p2.timestampMs;
+      const dtPrev = Math.max(1, p2.timestampMs - p1.timestampMs);
+      if (dtNow > 0 && dtNow <= 260) {
+        const predX = p2.x + ((p2.x - p1.x) / dtPrev) * dtNow;
+        const predY = p2.y + ((p2.y - p1.y) / dtPrev) * dtNow;
+        const radius = Math.max(54, video.videoWidth * 0.14);
+        const near = dynamicCands.filter((c) => Math.hypot(c.x - predX, c.y - predY) <= radius);
+        if (near.length > 0) {
+          chosenBall = near.reduce((best, c) =>
+            Math.hypot(c.x - predX, c.y - predY) < Math.hypot(best.x - predX, best.y - predY) ? c : best,
+          );
+        } else if (curTrack.length >= 4) {
+          // 已在穩定飛行中但候選都在預測半徑外 -> 雜訊點，不破壞現有軌跡
+          return;
+        }
+      }
     }
 
     const track = activeTrackRef.current;
     const betweenSamples = track.length
-      ? latestBall.timestampMs - track[track.length - 1].timestampMs
+      ? chosenBall.timestampMs - track[track.length - 1].timestampMs
       : 0;
     // 允許 WASM 偶發掉 1–2 幀（最高 260ms 間隔不斷軌），避免 5–9 幀真實飛行球被中途清空
     const trackGapLimitMs = Math.max(MAX_PITCH_SAMPLE_GAP_MS, 260);
     if (track.length && (betweenSamples <= 0 || (!manualCheckpoints && betweenSamples > trackGapLimitMs) ||
-      latestBall.timestampMs - track[0].timestampMs > 1600)) {
+      chosenBall.timestampMs - track[0].timestampMs > 1600)) {
       resetTrack();
     }
 
@@ -901,11 +928,11 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       const height = region.height * video.videoHeight;
       const sx = width / Math.max(1, Math.round(width));
       const sy = height / Math.max(1, Math.round(height));
-      if (latestBall.x < 0 || latestBall.x * sx > width || latestBall.y < 0 || latestBall.y * sy > height) return;
-      activeTrack.push({ ...latestBall, x: region.x * video.videoWidth + latestBall.x * sx,
-        y: region.y * video.videoHeight + latestBall.y * sy, width: latestBall.width * sx, height: latestBall.height * sy });
+      if (chosenBall.x < 0 || chosenBall.x * sx > width || chosenBall.y < 0 || chosenBall.y * sy > height) return;
+      activeTrack.push({ ...chosenBall, x: region.x * video.videoWidth + chosenBall.x * sx,
+        y: region.y * video.videoHeight + chosenBall.y * sy, width: chosenBall.width * sx, height: chosenBall.height * sy });
     } else {
-      activeTrack.push(latestBall);
+      activeTrack.push(chosenBall);
     }
     if (uploadedVideoUrl) detectedInFileRef.current += 1;
     setLiveTrackDots([...activeTrack]);
@@ -1007,7 +1034,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     manualCheckpoints,
     discipline,
     distanceMeters,
-    latestBall, region,
+    latestBall, latestCandidates, poseGate, region,
     onNewMeasuredPitch,
     resetTrack,
     selectedPitchType,

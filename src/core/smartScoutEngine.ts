@@ -50,7 +50,7 @@ export function estimateAutomaticPitchFlight({
     const x = points[i + 1].x - points[i].x;
     const y = points[i + 1].y - points[i].y;
     const valid = dt > 0 && dt <= MAX_PITCH_SAMPLE_GAP_MS &&
-      [detections[i], d].every((sample) => sample.confidence >= 0.22 &&
+      [detections[i], d].every((sample) => sample.confidence >= 0.12 &&
         sample.width > 0 && sample.height > 0 && sample.x >= 0 &&
         sample.x <= videoWidth && sample.y >= 0 && sample.y <= videoHeight);
     return { x, y, dt, valid, rate: Math.hypot(x, y) / dt };
@@ -161,21 +161,23 @@ export function estimateAutomaticPitchFlight({
             e === segEnd && steps[e - 1]?.dt > 45 && sizeRatio >= 1.50 ? 33.37 : 0;
           const flightTimeMs = lastDet.timestampMs - firstDet.timestampMs - releasePadMs - catchPadMs;
           const speedKmh = (distance * 3600) / flightTimeMs / 0.955;
+          const segTrack = detections.slice(s, e + 1);
+          const meanConf = segTrack.reduce((acc, d) => acc + d.confidence, 0) / Math.max(1, segTrack.length);
           if (
             (isDepthTrack || isObliqueTrack) &&
             hasEndStop &&
+            meanConf >= 0.24 &&
             flightTimeMs >= 320 &&
             flightTimeMs <= 920 &&
             speedKmh >= 45 &&
             speedKmh <= 158 &&
             ![first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
           ) {
-            const track = detections.slice(s, e + 1);
             return {
-              track,
+              track: segTrack,
               flightTimeMs: Number(flightTimeMs.toFixed(1)),
               speedKmh: Number(speedKmh.toFixed(1)),
-              detectionCount: track.length,
+              detectionCount: segTrack.length,
             };
           }
         }
