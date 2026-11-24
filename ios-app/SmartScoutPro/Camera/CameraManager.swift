@@ -486,6 +486,14 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             frameWidth: CGFloat(w),
             primaryConf: mode.defaultConfidence
         ) else { return }
+        // 屏蔽前景投手白球褲反光誤判
+        if poseGate.isInsidePitcherPants(
+            x: det.x,
+            y: det.y,
+            atMs: tsMs,
+            boxSize: max(det.width, det.height),
+            trackCount: activeTrack.count
+        ) { return }
 
         if let prev = activeTrack.last {
             let gap = det.timestampMs - prev.timestampMs

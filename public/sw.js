@@ -1,5 +1,5 @@
 // 版本號：更新前端 UI 時改 APP_CACHE；重新訓練替換 .onnx 模型時改 AI_CACHE
-const APP_CACHE = 'smartscout-app-v15';
+const APP_CACHE = 'smartscout-app-v16';
 const AI_CACHE = 'pitchspeed-ai-v6';
 const VALID_CACHES = [APP_CACHE, AI_CACHE];
 

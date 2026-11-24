@@ -299,6 +299,31 @@ class PitcherPoseGate:
         vals = [kp[k, 1] for k in (a, b) if kp[k, 2] > 0.25]
         return float(np.mean(vals)) if vals else -1.0
 
+    @staticmethod
+    def is_inside_pitcher_pants(
+        state: Optional[FramePoseState], x: float, y: float, box_size: float, track_len: int
+    ) -> bool:
+        """Reject bright white-pants/knee reflections on foreground pitcher before a flight starts."""
+        if state is None or state.keypoints is None:
+            return False
+        kp = state.keypoints
+        sh_y = PitcherPoseGate._mid_y(kp, L_SHOULDER, R_SHOULDER)
+        hp_y = PitcherPoseGate._mid_y(kp, L_HIP, R_HIP)
+        if sh_y <= 0 or hp_y <= 0:
+            return False
+        torso = abs(hp_y - sh_y)
+        if torso < 48.0:
+            return False
+        lower = [k for k in (L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE) if kp[k, 2] > 0.25]
+        if len(lower) < 2:
+            return False
+        xs = [float(kp[k, 0]) for k in lower]
+        ys = [float(kp[k, 1]) for k in lower]
+        pad_x = torso * 0.22
+        if not (min(xs) - pad_x <= x <= max(xs) + pad_x and hp_y - torso * 0.05 <= y <= max(ys) + torso * 0.12):
+            return False
+        return track_len < 3 or box_size >= torso * 0.14
+
 
 def draw_pose_overlay(frame_bgr: np.ndarray, state: FramePoseState) -> np.ndarray:
     """Draw skeleton, throwing wrist highlight, and 4-phase badge for visual verification."""

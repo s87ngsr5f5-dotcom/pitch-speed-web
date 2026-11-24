@@ -595,8 +595,9 @@ def scan_video(
     cap.release()
 
     allowed_frames: Optional[set[int]] = None
+    pose_states = None
     if pose_gate is not None and frames:
-        _, release_events = pose_gate.analyze_frames(frames, fps, stride=1)
+        pose_states, release_events = pose_gate.analyze_frames(frames, fps, stride=1)
         rejected = getattr(pose_gate, "rejected_no_windup", [])
         if rejected:
             print(f"  [投手動作閘門] 排除無準備動作的假出手: {', '.join(f'f{r}' for r in sorted(rejected))}", flush=True)
@@ -643,9 +644,15 @@ def scan_video(
 
         dets: List[Detection] = []
         for idx, cands in enumerate(per_frame_cands):
+            st = pose_states[idx] if (pose_states is not None and idx < len(pose_states)) else None
             dyn = [
                 c for c in cands
                 if grid_counts.get((int(c[0] // 14), int(c[1] // 14)), 0) < 6
+                and max(c[2] / max(1.0, c[3]), c[3] / max(1.0, c[2])) <= 2.4
+                and not (
+                    PitcherPoseGate is not None
+                    and PitcherPoseGate.is_inside_pitcher_pants(st, c[0], c[1], max(c[2], c[3]), len(dets))
+                )
             ]
             if not dyn:
                 continue

@@ -20,6 +20,8 @@ export const KP = {
   R_HIP: 12,
   L_KNEE: 13,
   R_KNEE: 14,
+  L_ANKLE: 15,
+  R_ANKLE: 16,
 } as const;
 
 /** 17 個關鍵點，每點 [x, y, conf]（像素座標，y 向下） */
@@ -56,6 +58,7 @@ export class PitcherPoseGate {
   private lastKp: PoseKeypoints | null = null;
   private lastKpTs = -1;
   private lastPersonSeenTs = -1_000_000;
+  private lastPantsBox: { x1: number; y1: number; x2: number; y2: number; torso: number; ts: number } | null = null;
   releases: PoseReleaseEvent[] = [];
 
   reset(): void {
@@ -64,6 +67,19 @@ export class PitcherPoseGate {
     this.lastKp = null;
     this.lastKpTs = -1;
     this.lastPersonSeenTs = -1_000_000;
+    this.lastPantsBox = null;
+  }
+
+  /**
+   * 判斷偵測點是否落在前景投手的「球褲／腿部區域」（髖部到腳踝），
+   * 用來封殺白球褲反光誤判為棒球（僅在未進入飛行軌跡或目標過大時啟用，不影響進壘尾段）。
+   */
+  isInsidePitcherPants(x: number, y: number, ts: number, boxSizePx = 0, trackLen = 0): boolean {
+    const b = this.lastPantsBox;
+    if (!b || Math.abs(ts - b.ts) > 400) return false;
+    if (x < b.x1 || x > b.x2 || y < b.y1 || y > b.y2) return false;
+    // 尚未形成飛行軌跡（前 3 幀內）或偵測框偏大（前景球褲亮斑）一律封殺
+    return trackLen < 3 || boxSizePx >= b.torso * 0.14;
   }
 
   isPoseAvailable(nearMs: number): boolean {
@@ -144,6 +160,21 @@ export class PitcherPoseGate {
     }
     this.lastKp = kp;
     this.lastKpTs = ts;
+    // 更新前景投手球褲包圍盒（髖部到膝蓋／腳踝），供封殺白球褲誤報
+    const lowerIds = [KP.L_HIP, KP.R_HIP, KP.L_KNEE, KP.R_KNEE, KP.L_ANKLE, KP.R_ANKLE].filter(ok);
+    if (lowerIds.length >= 2 && hpY !== null && torso >= 48) {
+      const xs = lowerIds.map((i) => kp[i][0]);
+      const ys = lowerIds.map((i) => kp[i][1]);
+      const padX = torso * 0.22;
+      this.lastPantsBox = {
+        x1: Math.min(...xs) - padX,
+        y1: hpY - torso * 0.05,
+        x2: Math.max(...xs) + padX,
+        y2: Math.max(...ys) + torso * 0.12,
+        torso,
+        ts,
+      };
+    }
     this.samples.push({ ts, personSeen: true, rSpeed, lSpeed, rAbove, lAbove, kneeLift });
     return this.trimAndDetect();
   }

@@ -40,6 +40,10 @@ function isFlightCorridorBall(
   hasRegion: boolean
 ): boolean {
   if (videoWidth <= 0 || videoHeight <= 0) return false;
+  // 濾除長條狀燈管、白線與過大球褲反光
+  const bw = Math.max(1, det.width);
+  const bh = Math.max(1, det.height);
+  if (Math.max(bw / bh, bh / bw) > 2.4) return false;
   if (det.width > videoWidth * 0.14 || det.height > videoHeight * 0.10) return false;
   if (hasRegion) return true;
   const ny = det.y / videoHeight;
@@ -171,6 +175,9 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   const activeTrackRef = useRef<BallDetection[]>([]);
   const flushTimerRef = useRef<number | null>(null);
   const sentTimestampsRef = useRef(new Set<number>());
+  // 滾動 90 幀靜態背景抑制器（14px 格點）：同一位置反覆亮 >= 5 次一律判為球場燈光／招牌，絕不當成棒球
+  const staticBinWindowRef = useRef<number[]>([]);
+  const staticBinCountsRef = useRef<Map<number, number>>(new Map());
   const [cameraCheckpoints, setCameraCheckpoints] = useState(() => ({
     behind_pitcher: readCheckpoints('behind_pitcher'),
     behind_catcher: readCheckpoints('behind_catcher'),
@@ -453,6 +460,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       timestampOffset = null;
       lastMediaTime = -1;
       sentTimestamps.clear();
+      staticBinWindowRef.current = [];
+      staticBinCountsRef.current.clear();
       resetTrack();
     };
     resetSource();
@@ -823,6 +832,38 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return;
     if (!isFlightCorridorBall(latestBall, video.videoWidth, video.videoHeight, Boolean(region))) {
+      return;
+    }
+
+    // 1. 靜態燈光／看板抑制（14px 格點，90 幀滑動視窗內重複 >= 5 次直接封殺）
+    const binKey = (Math.floor(latestBall.x / 14) << 16) | (Math.floor(latestBall.y / 14) & 0xffff);
+    const binWin = staticBinWindowRef.current;
+    const binMap = staticBinCountsRef.current;
+    const prevCount = binMap.get(binKey) ?? 0;
+    binMap.set(binKey, prevCount + 1);
+    binWin.push(binKey);
+    if (binWin.length > 90) {
+      const oldest = binWin.shift()!;
+      const c = (binMap.get(oldest) ?? 1) - 1;
+      if (c <= 0) binMap.delete(oldest);
+      else binMap.set(oldest, c);
+    }
+    if (prevCount >= 5) {
+      return;
+    }
+
+    // 2. 前景投手球褲骨架屏蔽（球褲／膝蓋／白鞋反光絕不啟動假軌跡）
+    const detSize = Math.max(latestBall.width, latestBall.height);
+    if (
+      !region &&
+      poseGate?.isInsidePitcherPants(
+        latestBall.x,
+        latestBall.y,
+        latestBall.timestampMs,
+        detSize,
+        activeTrackRef.current.length,
+      )
+    ) {
       return;
     }
 

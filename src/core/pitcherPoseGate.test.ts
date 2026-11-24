@@ -88,4 +88,15 @@ describe('PitcherPoseGate', () => {
     for (let t = 0; t < 1000; t += DT) blind.ingest(null, t);
     expect(blind.filter(balls)).toHaveLength(balls.length);
   });
+
+  it('blocks false detections on pitcher white pants (hips to ankles) while allowing high release points', () => {
+    const gate = new PitcherPoseGate();
+    gate.ingest(pose([540, 320]), 1000);
+    // 落在投手白球褲區（x=500, y=700，髖600～膝800之間）：尚未成軌應直接封殺
+    expect(gate.isInsidePitcherPants(500, 700, 1050, 18, 0)).toBe(true);
+    // 出手點在肩膀上方（x=540, y=320）：放行
+    expect(gate.isInsidePitcherPants(540, 320, 1050, 18, 0)).toBe(false);
+    // 已進入飛行軌跡且為遠端小球（boxSize=12 < torso*0.14=28）：不誤殺進壘尾段
+    expect(gate.isInsidePitcherPants(500, 700, 1050, 12, 5)).toBe(false);
+  });
 });

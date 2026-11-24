@@ -46,6 +46,17 @@ final class PitcherPoseGate {
         var lHip: CGPoint?
         var rKnee: CGPoint?
         var lKnee: CGPoint?
+        var rAnkle: CGPoint?
+        var lAnkle: CGPoint?
+    }
+
+    private struct PantsBox {
+        let x1: CGFloat
+        let y1: CGFloat
+        let x2: CGFloat
+        let y2: CGFloat
+        let torso: CGFloat
+        let ts: Double
     }
 
     private var samples: [Sample] = []
@@ -53,7 +64,14 @@ final class PitcherPoseGate {
     private var lastJointsTs: Double = -1
     private var lastPoseTs: Double = -1_000_000
     private var lastPersonSeenTs: Double = -1_000_000
+    private var lastPantsBox: PantsBox?
     private(set) var releases: [PoseReleaseEvent] = []
+
+    func isInsidePitcherPants(x: CGFloat, y: CGFloat, atMs ts: Double, boxSize: CGFloat, trackCount: Int) -> Bool {
+        guard let b = lastPantsBox, abs(ts - b.ts) <= 400 else { return false }
+        guard x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2 else { return false }
+        return trackCount < 3 || boxSize >= b.torso * 0.14
+    }
     private let request = VNDetectHumanBodyPoseRequest()
 
     func reset() {
@@ -63,6 +81,7 @@ final class PitcherPoseGate {
         lastJointsTs = -1
         lastPoseTs = -1_000_000
         lastPersonSeenTs = -1_000_000
+        lastPantsBox = nil
     }
 
     /// 每一幀呼叫；內部自動節流到 ~33Hz。
@@ -149,7 +168,8 @@ final class PitcherPoseGate {
             rWrist: p(.rightWrist), lWrist: p(.leftWrist),
             rShoulder: p(.rightShoulder), lShoulder: p(.leftShoulder),
             rHip: p(.rightHip), lHip: p(.leftHip),
-            rKnee: p(.rightKnee), lKnee: p(.leftKnee)
+            rKnee: p(.rightKnee), lKnee: p(.leftKnee),
+            rAnkle: p(.rightAnkle), lAnkle: p(.leftAnkle)
         )
     }
 
@@ -203,6 +223,20 @@ final class PitcherPoseGate {
         }
         lastJoints = j
         lastJointsTs = ts
+        let lowerPts = [j.lHip, j.rHip, j.lKnee, j.rKnee, j.lAnkle, j.rAnkle].compactMap { $0 }
+        if lowerPts.count >= 2, let h = hpY, torso >= 48 {
+            let xs = lowerPts.map { $0.x }
+            let ys = lowerPts.map { $0.y }
+            let padX = torso * 0.22
+            lastPantsBox = PantsBox(
+                x1: (xs.min() ?? 0) - padX,
+                y1: h - torso * 0.05,
+                x2: (xs.max() ?? 0) + padX,
+                y2: (ys.max() ?? h) + torso * 0.12,
+                torso: torso,
+                ts: ts
+            )
+        }
         samples.append(Sample(ts: ts, personSeen: true, rSpeed: rs, lSpeed: ls, rAbove: rAbove, lAbove: lAbove, kneeLift: knee))
         trimAndDetect()
     }
