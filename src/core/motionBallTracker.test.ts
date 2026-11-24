@@ -104,4 +104,62 @@ describe('extractFlyingBallTrackFromFrames (Hybrid Temporal+Pose Ballistic Track
     const dets = extractFlyingBallTrackFromFrames(frames, pw, ph, 600, 1040, null, null);
     expect(dets).toHaveLength(0);
   });
+
+  it('tracks a dead-center optical-axis rainbow parabola with apex gap and shrinking ball', () => {
+    const pw = 540;
+    const ph = 960;
+    const frames: MotionFrame[] = [];
+    // Simulate pitch-v1/v2 style indoor throw: rises to apex (y decreases), brief 2-frame gap, then falls into catcher mitt
+    const trajectory: Array<{ f: number; x: number; y: number; sz: number }> = [
+      { f: 4, x: 262, y: 446, sz: 10 },
+      { f: 5, x: 256, y: 441, sz: 7 },
+      { f: 6, x: 254, y: 438, sz: 4 },
+      { f: 7, x: 251, y: 438, sz: 2 },
+      // frames 8, 9 occluded behind net / apex
+      { f: 10, x: 251, y: 441, sz: 2 },
+      { f: 11, x: 250, y: 443, sz: 2 },
+      { f: 12, x: 251, y: 445, sz: 2 },
+      { f: 13, x: 250, y: 447, sz: 2 },
+      { f: 14, x: 251, y: 449, sz: 2 },
+      { f: 15, x: 251, y: 451, sz: 2 },
+      { f: 16, x: 252, y: 453, sz: 2 },
+      { f: 17, x: 254, y: 455, sz: 2 },
+      { f: 18, x: 255, y: 457, sz: 2 },
+      { f: 19, x: 255, y: 459, sz: 2 },
+    ];
+    const byFrame = new Map(trajectory.map((pt) => [pt.f, pt]));
+
+    for (let f = 0; f < 24; f++) {
+      const pt = byFrame.get(f);
+      frames.push(
+        makeFrame(
+          pw,
+          ph,
+          f * 33.37,
+          45,
+          pt ? (g) => drawRect(g, pw, ph, pt.x, pt.y, pt.sz, pt.sz, 235) : undefined,
+          {
+            // Pitcher foreground body sits right below the optical axis; head halo extends upward
+            ts: f * 33.37,
+            bodyBox: { x0: 120, y0: 645, x1: 315, y1: 960 },
+          },
+        ),
+      );
+    }
+
+    const dets = extractFlyingBallTrackFromFrames(
+      frames,
+      pw,
+      ph,
+      720,
+      1280,
+      null,
+      [{ releaseMs: 4 * 33.37, score: 24.0, throwingHand: 'R', wristX: 350, wristY: 590 }],
+    );
+
+    expect(dets.length).toBeGreaterThanOrEqual(12);
+    const flightMs = dets[dets.length - 1].timestampMs - dets[0].timestampMs;
+    expect(flightMs).toBeGreaterThanOrEqual(450);
+    expect(flightMs).toBeLessThanOrEqual(600);
+  });
 });

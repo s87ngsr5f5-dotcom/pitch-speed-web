@@ -132,13 +132,15 @@ export function estimateAutomaticPitchFlight({
         let e = segEnd;
         while (s < e && depthStationary(s)) s++;
         while (e > s && depthStationary(e - 1)) e--;
-        // 濾除出手前拉臂／蓄力回擺幀：只要前段移動方向與整體出手→進壘方向相反，就往後推到真正出手瞬間
+        // 濾除出手前拉臂／蓄力回擺幀：只要前段移動方向與整體出手→進壘方向相反，就往後推到真正出手瞬間（保留高拋彩虹球上升段）
         if (e - s >= 5) {
           const dirX = points[e].x - points[s].x;
           const dirY = points[e].y - points[s].y;
           const dirLen = Math.hypot(dirX, dirY);
           if (dirLen >= 0.012) {
             while (e - s >= 5 && (steps[s].x * dirX + steps[s].y * dirY) / dirLen < -0.004) {
+              const isRainbowRise = steps[s].y < 0 && Math.abs(steps[s].x) <= Math.abs(steps[s].y) * 1.4;
+              if (isRainbowRise) break;
               s++;
             }
           }
@@ -146,9 +148,12 @@ export function estimateAutomaticPitchFlight({
         if (e - s >= 5) {
           const firstDet = detections[s];
           const lastDet = detections[e];
-          const startSize = Math.max(firstDet.width, firstDet.height);
-          const endSize = Math.max(lastDet.width, lastDet.height);
-          const sizeRatio = Math.max(startSize / Math.max(1, endSize), endSize / Math.max(1, startSize));
+          const earlySzs = detections.slice(s, Math.min(e + 1, s + 3)).map((d) => Math.max(d.width, d.height));
+          const lateSzs = detections.slice(Math.max(s, e - 2), e + 1).map((d) => Math.max(d.width, d.height));
+          const sizeRatio = Math.max(
+            Math.max(...earlySzs) / Math.max(1, Math.min(...lateSzs)),
+            Math.max(...lateSzs) / Math.max(1, Math.min(...earlySzs)),
+          );
           const first = points[s];
           const last = points[e];
           const span = Math.hypot(last.x - first.x, last.y - first.y);

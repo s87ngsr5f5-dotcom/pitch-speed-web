@@ -89,11 +89,11 @@ def _pitcher_exclusion_boxes(
     return box, wrist_xy, glove_xy, torso
 
 
-def _fit_quadratic_residual(pts: Sequence[Tuple[float, float, float]]) -> Tuple[float, float]:
-    """Fit x(u), y(u) = a*u^2 + b*u + c for u in [0, 1]; return (mean_err_px, max_err_px)."""
+def _fit_quadratic_residual(pts: Sequence[Tuple[float, float, float]]) -> Tuple[float, float, float]:
+    """Fit x(u), y(u) = a*u^2 + b*u + c for u in [0, 1]; return (mean_err_px, max_err_px, ay_curvature)."""
     n = len(pts)
     if n < 4:
-        return 999.0, 999.0
+        return 999.0, 999.0, 0.0
     t0 = pts[0][2]
     dt_span = max(1.0, pts[-1][2] - t0)
     u = np.array([(p[2] - t0) / dt_span for p in pts], dtype=np.float64)
@@ -105,7 +105,8 @@ def _fit_quadratic_residual(pts: Sequence[Tuple[float, float, float]]) -> Tuple[
     ex = A @ cx - xs
     ey = A @ cy - ys
     errs = np.hypot(ex, ey)
-    return float(np.mean(errs)), float(np.max(errs))
+    # In image coords (y downward), gravity produces positive quadratic curvature cy[0] > 0 (rises then falls)
+    return float(np.mean(errs)), float(np.max(errs)), float(cy[0])
 
 
 def filter_dominant_releases(release_events: Optional[Sequence[Any]], fps: float) -> List[Any]:
@@ -230,7 +231,7 @@ def extract_temporal_ball_tracks(
         d1 = sub_c - sub_p
         d2 = sub_c - sub_n
 
-        bright_mask = (sub_c >= 105) & (d1 >= 16) & (d2 >= 16)
+        bright_mask = (sub_c >= 92) & (d1 >= 14) & (d2 >= 14)
         dark_mask = (sub_p >= 170) & (sub_n >= 170) & (d1 <= -18) & (d2 <= -18)
 
         # Pitcher body/pants/glove exclusion (for this frame)
@@ -246,7 +247,7 @@ def extract_temporal_ball_tracks(
                 area = int(stats[k, cv2.CC_STAT_AREA])
                 bw = int(stats[k, cv2.CC_STAT_WIDTH])
                 bh = int(stats[k, cv2.CC_STAT_HEIGHT])
-                if area < 3 or area > max_area:
+                if area < 2 or area > max_area:
                     continue
                 if max(bw, bh) > max_dim:
                     continue
@@ -255,6 +256,18 @@ def extract_temporal_ball_tracks(
                     continue
                 cx = float(centroids[k][0]) + x_min
                 cy = float(centroids[k][1]) + y_min
+                if area == 2:
+                    # Require strong combined temporal contrast for 2px distant balls to avoid sensor noise
+                    ry = min(proc_h - 1, max(0, int(round(cy))))
+                    rx = min(proc_w - 1, max(0, int(round(cx))))
+                    cd1 = int(curr_g[ry, rx] - prev_g[ry, rx])
+                    cd2 = int(curr_g[ry, rx] - next_g[ry, rx])
+                    if pol == 1:
+                        if (cd1 + cd2) < 34:
+                            continue
+                    else:
+                        if (cd1 + cd2) > -40:
+                            continue
                 # Reject blobs inside pitcher's torso/pants/legs unless right next to throwing wrist
                 if body_box is not None:
                     bx0, by0, bx1, by1 = body_box
@@ -269,7 +282,7 @@ def extract_temporal_ball_tracks(
                 br = float(curr_g[min(proc_h - 1, max(0, int(round(cy)))), min(proc_w - 1, max(0, int(round(cx))))])
                 blobs.append(TemporalBlob(x=cx, y=cy, w=float(bw), h=float(bh), area=float(area), brightness=br, polarity=pol))
 
-        if 0 < len(blobs) <= 45:
+        if 0 < len(blobs) <= 55:
             cands_by_frame.append((i, round(i * 1000.0 / fps, 2), blobs))
 
     if len(cands_by_frame) < 6:
@@ -277,8 +290,8 @@ def extract_temporal_ball_tracks(
 
     # 3) Perspective-aware ballistic linking
     max_step_base = max(48.0, proc_w * 0.16)
-    min_step_base = max(1.2, proc_w * 0.0028)
-    max_gap_frames = max(2, int(round(fps * 0.08)))  # allow 1-2 dropped frames
+    min_step_base = max(1.0, proc_w * 0.0020)
+    max_gap_frames = max(3, int(round(fps * 0.105)))  # allow 1-2 dropped/occluded frames (~100ms)
 
     # Group candidates by time windows (one pitch per release window if available, else global)
     # Track format: list of (frame_idx, ts_ms, blob)
@@ -352,16 +365,25 @@ def extract_temporal_ball_tracks(
                         if step_d < min_step_base * 0.65 * df or step_d > max_step_base * df:
                             continue
                         step_spd = step_d / df
-                        # Smooth speed evolution (prevents wild jumps to random background blobs)
-                        if prev_speed > 2.0 and not (0.38 * prev_speed <= step_spd <= 1.65 * prev_speed):
-                            continue
-                        # Forward direction consistency (dot product with current velocity)
+                        # Forward direction consistency — relax slightly for slow dead-center rainbow-arc apex where gravity bends vy downward
                         v_norm = math.hypot(vx, vy) + 1e-6
                         cos_sim = (dx * vx + dy * vy) / (step_d * v_norm + 1e-6)
-                        if cos_sim < 0.68:
+                        is_gravity_apex = (
+                            step_spd <= 7.0
+                            and prev_speed <= 12.0
+                            and dy >= vy * df - 2.0
+                            and dy <= vy * df + 8.5 * df
+                            and abs(dx - vx * df) <= max(4.5, abs(vx * df) * 0.9 + 3.5)
+                        )
+                        # Smooth speed evolution (prevents wild jumps to random background blobs; allow slower apex turn)
+                        min_spd_ratio = 0.22 if is_gravity_apex else 0.38
+                        if prev_speed > 2.0 and not (min_spd_ratio * prev_speed <= step_spd <= 1.65 * prev_speed):
+                            continue
+                        if cos_sim < 0.68 and not is_gravity_apex:
                             continue
                         err = math.hypot(cand.x - pred_x, cand.y - pred_y)
-                        if err <= tol and err < best_err:
+                        eff_tol = max(tol, 12.5) if (is_gravity_apex and df >= 2) else tol
+                        if err <= eff_tol and err < best_err:
                             best_err = err
                             best_cand = cand
 
@@ -379,17 +401,16 @@ def extract_temporal_ball_tracks(
                 if len(track) < 6:
                     continue
 
-                # Trim post-catch stagnation / sudden reversal tail
+                # Trim post-catch stagnation, recoil, or late-gap catcher-glove artifacts
                 core_a = max(0, len(track) // 6)
                 core_b = min(len(track) - 1, (len(track) * 3) // 4)
                 dir_x = track[core_b][2].x - track[core_a][2].x
                 dir_y = track[core_b][2].y - track[core_a][2].y
                 dir_len = math.hypot(dir_x, dir_y)
-                if dir_len < proc_w * 0.04:
+                if dir_len < proc_w * 0.014:
                     continue
                 ux, uy = dir_x / dir_len, dir_y / dir_len
 
-                # Trim post-catch stagnation, recoil, or late-gap catcher-glove artifacts
                 end_i = len(track) - 1
                 while end_i >= 6:
                     dx = track[end_i][2].x - track[end_i - 1][2].x
@@ -400,7 +421,7 @@ def extract_temporal_ball_tracks(
                     # Cut off post-catch glove movement after a frame gap (ball vanished into mitt)
                     prev_st = math.hypot(track[end_i - 1][2].x - track[end_i - 2][2].x, track[end_i - 1][2].y - track[end_i - 2][2].y)
                     is_post_catch_gap = end_i >= 8 and df_tail >= 2 and (st > prev_st * 1.25 or st < min_step_base * 1.4)
-                    if st < min_step_base * 0.85 or align < 0.25 or is_post_catch_gap:
+                    if st < min_step_base * 0.75 or align < 0.10 or is_post_catch_gap:
                         end_i -= 1
                     else:
                         break
@@ -408,14 +429,16 @@ def extract_temporal_ball_tracks(
                 if len(track) < 6:
                     continue
 
-                # Trim pre-release backward-cocking frames if any
+                # Trim pre-release backward-cocking frames (preserve genuine rising-to-apex rainbow launch!)
                 start_i = 0
                 while len(track) - start_i >= 6:
                     dx = track[start_i + 1][2].x - track[start_i][2].x
                     dy = track[start_i + 1][2].y - track[start_i][2].y
                     st = math.hypot(dx, dy)
                     align = (dx * ux + dy * uy) / max(1e-6, st)
-                    if align < 0.25:
+                    # Allow upward launch (dy < 0) if next step also continues smoothly along arc
+                    is_rainbow_launch = dy < 0 and abs(dx) <= max(6.0, abs(dy) * 1.2)
+                    if align < 0.25 and not is_rainbow_launch:
                         start_i += 1
                     else:
                         break
@@ -427,10 +450,21 @@ def extract_temporal_ball_tracks(
                 span = math.hypot(track[-1][2].x - track[0][2].x, track[-1][2].y - track[0][2].y)
                 if not (300.0 <= dt_ms <= 900.0):
                     continue
-                if span < proc_w * 0.055:
+
+                # Perspective size consistency (use early-3 / late-3 extrema so a 1-frame release peek or glove flash doesn't hide depth shrink)
+                early_szs = [max(p[2].w, p[2].h) for p in track[: min(3, len(track))]]
+                late_szs = [max(p[2].w, p[2].h) for p in track[max(0, len(track) - 3) :]]
+                start_sz = max(early_szs)
+                end_sz = min(late_szs)
+                size_ratio = max(start_sz / max(1.0, end_sz), max(late_szs) / max(1.0, min(early_szs)))
+
+                # Allow tight dead-center optical-axis arcs (span >= 2.2% width) when depth-shrinking is strong
+                min_span = proc_w * 0.022 if (size_ratio >= 1.45 and len(track) >= 8) else proc_w * 0.055
+                if span < min_span:
                     continue
 
-                # Reject tracks that end on/inside the pitcher's own body/head (e.g. follow-through arm or walk-off)
+                # Reject tracks that end on/inside the pitcher's own body/head (e.g. follow-through arm or walk-off),
+                # while allowing distant shrunk baseballs (size_ratio >= 1.45, end_sz <= 8px) flying past above the shoulders
                 if pose_states is not None:
                     end_f = track[-1][0]
                     if 0 <= end_f < len(pose_states):
@@ -439,7 +473,10 @@ def extract_temporal_ball_tracks(
                             bx0, by0, bx1, by1 = e_box
                             bh = max(20.0, by1 - by0)
                             ex_p, ey_p = track[-1][2].x, track[-1][2].y
-                            if bx0 - bh * 0.12 <= ex_p <= bx1 + bh * 0.12 and by0 - bh * 0.28 <= ey_p <= by1:
+                            in_body = bx0 <= ex_p <= bx1 and by0 <= ey_p <= by1
+                            in_head_halo = bx0 - bh * 0.10 <= ex_p <= bx1 + bh * 0.10 and by0 - bh * 0.26 <= ey_p <= by0
+                            is_distant_shrunk_ball = size_ratio >= 1.45 and end_sz <= 8.0 and len(track) >= 8
+                            if in_body or (in_head_halo and not is_distant_shrunk_ball):
                                 continue
 
                 # Reject steep upward windup hand-raise trajectories (pitches fly forward/downward under gravity)
@@ -448,22 +485,19 @@ def extract_temporal_ball_tracks(
                 if upward_rise > proc_h * 0.04 and upward_rise > horiz_span * 0.45:
                     continue
 
-                # Check quadratic ballistic parabola smoothness
+                # Check quadratic ballistic parabola smoothness + gravity curvature
                 pts_for_fit = [(p[2].x, p[2].y, p[1]) for p in track]
-                mean_err, max_err = _fit_quadratic_residual(pts_for_fit)
+                mean_err, max_err, ay_curv = _fit_quadratic_residual(pts_for_fit)
                 err_limit = max(3.5, proc_w * 0.009)
                 if mean_err > err_limit or max_err > err_limit * 2.6:
                     continue
 
-                # Check monotonic projection along flight direction (no zig-zag noise)
+                # Check monotonic projection along flight direction OR valid downward-curving gravity rainbow arc
                 projs = [(p[2].x - track[0][2].x) * ux + (p[2].y - track[0][2].y) * uy for p in track]
-                if any(projs[k] <= projs[k - 1] for k in range(1, len(projs))):
+                is_monotonic = not any(projs[k] <= projs[k - 1] for k in range(1, len(projs)))
+                is_gravity_rainbow = ay_curv >= 4.0 and mean_err <= 2.4 and size_ratio >= 1.40 and len(track) >= 8
+                if not is_monotonic and not is_gravity_rainbow:
                     continue
-
-                # Perspective size consistency (ball shrinks behind pitcher or grows behind catcher, or stays small)
-                start_sz = max(track[0][2].w, track[0][2].h)
-                end_sz = max(track[-1][2].w, track[-1][2].h)
-                size_ratio = max(start_sz / max(1.0, end_sz), end_sz / max(1.0, start_sz))
 
                 # Score track quality (favor capturing the full release-to-glove span over dropping frame 0)
                 score = (

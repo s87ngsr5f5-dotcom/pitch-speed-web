@@ -181,10 +181,10 @@ def estimate_pitch_segments(
     """Mirror of TypeScript estimateAutomaticPitchFlight (finalized segment-aware)."""
     if len(dets) < 6:
         return []
-    # Drop static repeating background false positives (same pixel cluster >= 6 frames)
+    # Drop static repeating background false positives (same pixel cluster within +-2.5px for >= 6 frames)
     filtered: List[Detection] = []
     for d in dets:
-        near = sum(1 for o in dets if abs(o.x - d.x) <= 6.0 and abs(o.y - d.y) <= 6.0)
+        near = sum(1 for o in dets if abs(o.x - d.x) <= 2.5 and abs(o.y - d.y) <= 2.5)
         if near >= 6:
             continue
         filtered.append(d)
@@ -225,19 +225,22 @@ def estimate_pitch_segments(
                 s += 1
             while e > s and depth_stat(e - 1):
                 e -= 1
-            # 濾除出手前拉臂／蓄力回擺幀，對齊真正出手瞬間
+            # 濾除出手前拉臂／蓄力回擺幀，對齊真正出手瞬間（保留高拋彩虹球上升段）
             if e - s >= 5:
                 dir_x = pts[e][0] - pts[s][0]
                 dir_y = pts[e][1] - pts[s][1]
                 dir_len = math.hypot(dir_x, dir_y)
                 if dir_len >= 0.012:
                     while e - s >= 5 and (steps[s][0] * dir_x + steps[s][1] * dir_y) / dir_len < -0.004:
+                        is_rainbow_rise = steps[s][1] < 0 and abs(steps[s][0]) <= abs(steps[s][1]) * 1.4
+                        if is_rainbow_rise:
+                            break
                         s += 1
             if e - s >= 5:
                 d_first, d_last = dets[s], dets[e]
-                s_sz = max(d_first.width, d_first.height)
-                e_sz = max(d_last.width, d_last.height)
-                size_ratio = max(s_sz / max(1.0, e_sz), e_sz / max(1.0, s_sz))
+                early_szs = [max(dets[k].width, dets[k].height) for k in range(s, min(e + 1, s + 3))]
+                late_szs = [max(dets[k].width, dets[k].height) for k in range(max(s, e - 2), e + 1)]
+                size_ratio = max(max(early_szs) / max(1.0, min(late_szs)), max(late_szs) / max(1.0, min(early_szs)))
                 span = math.hypot(pts[e][0] - pts[s][0], pts[e][1] - pts[s][1])
                 has_end_stop = e < seg_end or size_ratio >= 1.30 or (span >= 0.14 and (e - s) >= 7)
                 is_depth = size_ratio >= 1.30 and span >= 0.014

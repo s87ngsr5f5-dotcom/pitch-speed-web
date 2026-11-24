@@ -25,9 +25,9 @@ interface TrackNode {
 }
 
 /** 3x3 linear solver for quadratic least squares a*u^2 + b*u + c */
-function fitQuadraticResidual(nodes: TrackNode[]): { meanErr: number; maxErr: number } {
+function fitQuadraticResidual(nodes: TrackNode[]): { meanErr: number; maxErr: number; ayCurv: number } {
   const n = nodes.length;
-  if (n < 4) return { meanErr: 999, maxErr: 999 };
+  if (n < 4) return { meanErr: 999, maxErr: 999, ayCurv: 0 };
   const t0 = nodes[0].timestampMs;
   const span = Math.max(1, nodes[n - 1].timestampMs - t0);
 
@@ -80,7 +80,7 @@ function fitQuadraticResidual(nodes: TrackNode[]): { meanErr: number; maxErr: nu
 
   const cx = solve3(bx0, bx1, bx2);
   const cy = solve3(by0, by1, by2);
-  if (!cx || !cy) return { meanErr: 999, maxErr: 999 };
+  if (!cx || !cy) return { meanErr: 999, maxErr: 999, ayCurv: 0 };
 
   let sumErr = 0;
   let maxErr = 0;
@@ -92,7 +92,7 @@ function fitQuadraticResidual(nodes: TrackNode[]): { meanErr: number; maxErr: nu
     sumErr += e;
     if (e > maxErr) maxErr = e;
   }
-  return { meanErr: sumErr / n, maxErr };
+  return { meanErr: sumErr / n, maxErr, ayCurv: cy[0] };
 }
 
 /** Fast strided camera-pan / camera-shake rejection (identical to Desktop temporal_ball_tracker.py). */
@@ -189,7 +189,6 @@ export function extractFlyingBallTrackFromFrames(
   const dimScale = Math.min(procWidth, procHeight) / 540;
   const maxDim = Math.max(16, Math.round(34 * dimScale));
   const maxArea = Math.max(130, Math.round(420 * dimScale * dimScale));
-  const minArea = Math.min(procWidth, procHeight) >= 420 ? 3 : 2;
 
   const totalPixels = procWidth * procHeight;
   const visited = new Uint8Array(totalPixels);
@@ -227,7 +226,7 @@ export function extractFlyingBallTrackFromFrames(
         const n = next[idx];
         const d1 = c - p;
         const d2 = c - n;
-        if (c >= 105 && d1 >= 16 && d2 >= 16) {
+        if (c >= 92 && d1 >= 14 && d2 >= 14) {
           brightMask[idx] = 1;
           hasBright = true;
         } else if (p >= 170 && n >= 170 && d1 <= -18 && d2 <= -18) {
@@ -314,12 +313,24 @@ export function extractFlyingBallTrackFromFrames(
 
           const bw = bx1 - bx0 + 1;
           const bh = by1 - by0 + 1;
-          if (area < minArea || area > maxArea || Math.max(bw, bh) > maxDim) continue;
+          if (area < 2 || area > maxArea || Math.max(bw, bh) > maxDim) continue;
           const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
           if (aspect > 3.6) continue;
 
           const cx = sumX / area;
           const cy = sumY / area;
+          if (area === 2) {
+            const ry = Math.min(procHeight - 1, Math.max(0, Math.round(cy)));
+            const rx = Math.min(procWidth - 1, Math.max(0, Math.round(cx)));
+            const cIdx = ry * procWidth + rx;
+            const cd1 = curr[cIdx] - prev[cIdx];
+            const cd2 = curr[cIdx] - next[cIdx];
+            if (polarity === 1) {
+              if (cd1 + cd2 < 34) continue;
+            } else if (cd1 + cd2 > -40) {
+              continue;
+            }
+          }
 
           // Exclude pitcher's torso/pants/legs unless right next to throwing wrist
           if (bodyBox && cx >= bodyBox.x0 && cx <= bodyBox.x1 && cy >= bodyBox.y0 && cy <= bodyBox.y1) {
@@ -339,7 +350,7 @@ export function extractFlyingBallTrackFromFrames(
     if (hasBright) extractFromMask(brightMask, 1);
     if (hasDark) extractFromMask(darkMask, -1);
 
-    if (blobs.length > 0 && blobs.length <= 45) {
+    if (blobs.length > 0 && blobs.length <= 55) {
       candsByIdx.push({ frameIdx: i, timestampMs: ts, blobs });
     }
   }
@@ -348,8 +359,8 @@ export function extractFlyingBallTrackFromFrames(
 
   // Perspective-aware ballistic linking
   const maxStepBase = Math.max(36, procWidth * 0.16);
-  const minStepBase = Math.max(1.0, procWidth * 0.0028);
-  const maxGapFrames = Math.max(2, Math.round(estFps * 0.08));
+  const minStepBase = Math.max(1.0, procWidth * 0.0020);
+  const maxGapFrames = Math.max(3, Math.round(estFps * 0.105));
 
   let bestTrack: TrackNode[] = [];
   let bestScore = -1;
@@ -419,11 +430,19 @@ export function extractFlyingBallTrackFromFrames(
             const stepD = Math.hypot(dx, dy);
             if (stepD < minStepBase * 0.65 * df || stepD > maxStepBase * df) continue;
             const stepSpd = stepD / df;
-            if (prevSpeed > 1.8 && (stepSpd < 0.38 * prevSpeed || stepSpd > 1.65 * prevSpeed)) continue;
             const cosSim = (dx * vx + dy * vy) / (stepD * vNorm + 1e-6);
-            if (cosSim < 0.68) continue;
+            const isGravityApex =
+              stepSpd <= 7.0 &&
+              prevSpeed <= 12.0 &&
+              dy >= vy * df - 2.0 &&
+              dy <= vy * df + 8.5 * df &&
+              Math.abs(dx - vx * df) <= Math.max(4.5, Math.abs(vx * df) * 0.9 + 3.5);
+            const minSpdRatio = isGravityApex ? 0.22 : 0.38;
+            if (prevSpeed > 1.8 && (stepSpd < minSpdRatio * prevSpeed || stepSpd > 1.65 * prevSpeed)) continue;
+            if (cosSim < 0.68 && !isGravityApex) continue;
             const err = Math.hypot(cand.x - predX, cand.y - predY);
-            if (err <= tol && err < bestErr) {
+            const effTol = isGravityApex && df >= 2 ? Math.max(tol, 12.5) : tol;
+            if (err <= effTol && err < bestErr) {
               bestErr = err;
               bestCand = cand;
             }
@@ -452,7 +471,7 @@ export function extractFlyingBallTrackFromFrames(
         const dirX = track[coreB].blob.x - track[coreA].blob.x;
         const dirY = track[coreB].blob.y - track[coreA].blob.y;
         const dirLen = Math.hypot(dirX, dirY);
-        if (dirLen < procWidth * 0.04) continue;
+        if (dirLen < procWidth * 0.014) continue;
         const ux = dirX / dirLen;
         const uy = dirY / dirLen;
 
@@ -468,20 +487,21 @@ export function extractFlyingBallTrackFromFrames(
           );
           const isPostCatchGap = endI >= 8 && dfTail >= 2 && (st > prevSt * 1.25 || st < minStepBase * 1.4);
           const align = (dx * ux + dy * uy) / Math.max(1e-6, st);
-          if (st < minStepBase * 0.85 || align < 0.25 || isPostCatchGap) endI--;
+          if (st < minStepBase * 0.75 || align < 0.10 || isPostCatchGap) endI--;
           else break;
         }
         let trimmed = track.slice(0, endI + 1);
         if (trimmed.length < 6) continue;
 
-        // Trim pre-release backward cocking frames
+        // Trim pre-release backward cocking frames (preserve genuine rising-to-apex rainbow launch!)
         let startI = 0;
         while (trimmed.length - startI >= 6) {
           const dx = trimmed[startI + 1].blob.x - trimmed[startI].blob.x;
           const dy = trimmed[startI + 1].blob.y - trimmed[startI].blob.y;
           const st = Math.hypot(dx, dy);
           const align = (dx * ux + dy * uy) / Math.max(1e-6, st);
-          if (align < 0.25) startI++;
+          const isRainbowLaunch = dy < 0 && Math.abs(dx) <= Math.max(6, Math.abs(dy) * 1.2);
+          if (align < 0.25 && !isRainbowLaunch) startI++;
           else break;
         }
         trimmed = trimmed.slice(startI);
@@ -492,9 +512,16 @@ export function extractFlyingBallTrackFromFrames(
           trimmed[trimmed.length - 1].blob.x - trimmed[0].blob.x,
           trimmed[trimmed.length - 1].blob.y - trimmed[0].blob.y,
         );
-        if (dtMs < 300 || dtMs > 900 || span < procWidth * 0.055) continue;
+        const earlySzs = trimmed.slice(0, Math.min(3, trimmed.length)).map((n) => Math.max(n.blob.w, n.blob.h));
+        const lateSzs = trimmed.slice(Math.max(0, trimmed.length - 3)).map((n) => Math.max(n.blob.w, n.blob.h));
+        const startSz = Math.max(...earlySzs);
+        const endSz = Math.min(...lateSzs);
+        const sizeRatio = Math.max(startSz / Math.max(1, endSz), Math.max(...lateSzs) / Math.max(1, Math.min(...earlySzs)));
+        const minSpan = sizeRatio >= 1.45 && trimmed.length >= 8 ? procWidth * 0.022 : procWidth * 0.055;
+        if (dtMs < 300 || dtMs > 900 || span < minSpan) continue;
 
-        // Reject tracks that end on/inside the pitcher's own body/head (e.g. post-pitch walk-off or follow-through arm)
+        // Reject tracks that end on/inside the pitcher's own body/head (e.g. post-pitch walk-off or follow-through arm),
+        // while allowing distant shrunk baseballs (sizeRatio >= 1.45, endSz <= 8px) flying past above the shoulders
         const endExcl = frames[trimmed[trimmed.length - 1].frameIdx]?.exclusion;
         if (endExcl?.bodyBox) {
           const bb = endExcl.bodyBox;
@@ -504,8 +531,14 @@ export function extractFlyingBallTrackFromFrames(
           const by1 = bb.y1 * toProcY;
           const bH = Math.max(20, by1 - by0);
           const endNode = trimmed[trimmed.length - 1].blob;
-          // Extend upward by 0.25*bodyHeight to also cover pitcher's head/neck
-          if (endNode.x >= bx0 - bH * 0.12 && endNode.x <= bx1 + bH * 0.12 && endNode.y >= by0 - bH * 0.28 && endNode.y <= by1) {
+          const inBody = endNode.x >= bx0 && endNode.x <= bx1 && endNode.y >= by0 && endNode.y <= by1;
+          const inHeadHalo =
+            endNode.x >= bx0 - bH * 0.10 &&
+            endNode.x <= bx1 + bH * 0.10 &&
+            endNode.y >= by0 - bH * 0.26 &&
+            endNode.y <= by0;
+          const isDistantShrunkBall = sizeRatio >= 1.45 && endSz <= 8.0 && trimmed.length >= 8;
+          if (inBody || (inHeadHalo && !isDistantShrunkBall)) {
             continue;
           }
         }
@@ -515,12 +548,12 @@ export function extractFlyingBallTrackFromFrames(
         const horizSpan = Math.abs(trimmed[trimmed.length - 1].blob.x - trimmed[0].blob.x);
         if (upwardRise > procHeight * 0.04 && upwardRise > horizSpan * 0.45) continue;
 
-        // Quadratic parabola smoothness verification
-        const { meanErr, maxErr } = fitQuadraticResidual(trimmed);
+        // Quadratic parabola smoothness verification + gravity curvature
+        const { meanErr, maxErr, ayCurv } = fitQuadraticResidual(trimmed);
         const errLimit = Math.max(3.2, procWidth * 0.009);
         if (meanErr > errLimit || maxErr > errLimit * 2.6) continue;
 
-        // Monotonic projection along flight direction
+        // Monotonic projection along flight direction OR valid downward-curving gravity rainbow arc
         let monotonic = true;
         let prevProj = -1e9;
         for (const node of trimmed) {
@@ -531,11 +564,8 @@ export function extractFlyingBallTrackFromFrames(
           }
           prevProj = proj;
         }
-        if (!monotonic) continue;
-
-        const startSz = Math.max(trimmed[0].blob.w, trimmed[0].blob.h);
-        const endSz = Math.max(trimmed[trimmed.length - 1].blob.w, trimmed[trimmed.length - 1].blob.h);
-        const sizeRatio = Math.max(startSz / Math.max(1, endSz), endSz / Math.max(1, startSz));
+        const isGravityRainbow = ayCurv >= 4.0 && meanErr <= 2.4 && sizeRatio >= 1.4 && trimmed.length >= 8;
+        if (!monotonic && !isGravityRainbow) continue;
 
         let score =
           trimmed.length * 22 +
