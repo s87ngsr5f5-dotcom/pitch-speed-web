@@ -248,7 +248,13 @@ export function App() {
   }, [modelUrl, actionModelUrl, poseModelUrl]);
 
   const handleFrame = useCallback(
-    (bitmap: ImageBitmap, timestampMs: number, origWidth: number, origHeight: number) => {
+    (
+      bitmap: ImageBitmap,
+      timestampMs: number,
+      origWidth: number,
+      origHeight: number,
+      predictedRoi?: { x: number; y: number; radius: number }
+    ) => {
       const w = workerRef.current;
       if (!w) {
         bitmap.close();
@@ -264,6 +270,7 @@ export function App() {
             origWidth,
             origHeight,
             detectAction: false,
+            predictedRoi,
           } satisfies WorkerInMessage,
           [bitmap]
         );

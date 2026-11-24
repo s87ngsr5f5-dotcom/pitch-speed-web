@@ -99,14 +99,17 @@ async function initModel(
   }
 }
 
-function preprocess(bitmap: ImageBitmap) {
+function preprocess(
+  bitmap: ImageBitmap,
+  roi?: { srcX: number; srcY: number; srcW: number; srcH: number }
+) {
   if (!ctx || !inputBuffer) throw new Error('Canvas buffer not initialized');
-  // 單類別自訓棒球模型使用完整畫面 320x320 Letterbox（與訓練分佈 100% 一致，準度最高）；僅 COCO 通用模型才啟用變焦裁切
-  const useTunnelZoom = !isSingleClassModel && inputSize <= 384 && bitmap.height >= 480 && bitmap.width >= 360;
-  const srcX = useTunnelZoom ? Math.floor(bitmap.width * 0.10) : 0;
-  const srcY = useTunnelZoom ? Math.floor(bitmap.height * 0.10) : 0;
-  const srcW = useTunnelZoom ? Math.floor(bitmap.width * 0.80) : bitmap.width;
-  const srcH = useTunnelZoom ? Math.floor(bitmap.height * 0.55) : bitmap.height;
+  // 單類別自訓棒球模型使用完整畫面 320x320 Letterbox（與訓練分佈 100% 一致）；遠端小球追焦時改裁切指定 ROI 放大 2.8x
+  const useTunnelZoom = !roi && !isSingleClassModel && inputSize <= 384 && bitmap.height >= 480 && bitmap.width >= 360;
+  const srcX = roi ? roi.srcX : useTunnelZoom ? Math.floor(bitmap.width * 0.10) : 0;
+  const srcY = roi ? roi.srcY : useTunnelZoom ? Math.floor(bitmap.height * 0.10) : 0;
+  const srcW = roi ? roi.srcW : useTunnelZoom ? Math.floor(bitmap.width * 0.80) : bitmap.width;
+  const srcH = roi ? roi.srcH : useTunnelZoom ? Math.floor(bitmap.height * 0.55) : bitmap.height;
 
   const scale = Math.min(inputSize / srcW, inputSize / srcH);
   const drawWidth = preserveAspectRatio ? Math.max(1, Math.round(srcW * scale)) : inputSize;
@@ -151,7 +154,8 @@ function parseBestBall(
   origWidth: number,
   origHeight: number,
   timestampMs: number,
-  { padX, padY, drawWidth, drawHeight, srcX, srcY, srcW, srcH, bitmapW, bitmapH }: ReturnType<typeof preprocess>
+  { padX, padY, drawWidth, drawHeight, srcX, srcY, srcW, srcH, bitmapW, bitmapH }: ReturnType<typeof preprocess>,
+  thresholdOverride?: number
 ): BallDetection | null {
   const data = output.data as Float32Array;
   const channels = output.dims[1];
@@ -161,7 +165,7 @@ function parseBestBall(
   if (targetClassIdx >= numClasses) return null;
 
   const offset = (4 + targetClassIdx) * anchors;
-  let bestScore = confThreshold;
+  let bestScore = thresholdOverride ?? confThreshold;
   let bestIdx = -1;
 
   for (let i = 0; i < anchors; i++) {
@@ -250,13 +254,44 @@ workerScope.onmessage = async (event: MessageEvent<WorkerInMessage>) => {
         if (!session) throw new Error('ONNX model is not ready');
         const frame = preprocess(msg.bitmap);
         const results = await session.run({ [session.inputNames[0]]: frame.tensor });
-        const detection = parseBestBall(
+        let detection = parseBestBall(
           results[session.outputNames[0]],
           msg.origWidth,
           msg.origHeight,
           msg.timestampMs,
           frame,
         );
+        // 球飛向本壘變小（4–8px）被全畫面漏掉時，自動以預測落點做 2.8x 局部放大補抓
+        if (!detection && msg.predictedRoi) {
+          const toBmpX = msg.bitmap.width / Math.max(1, msg.origWidth);
+          const toBmpY = msg.bitmap.height / Math.max(1, msg.origHeight);
+          const side = Math.max(160, Math.round(Math.min(msg.bitmap.width, msg.bitmap.height) * 0.36));
+          const cx = msg.predictedRoi.x * toBmpX;
+          const cy = msg.predictedRoi.y * toBmpY;
+          const srcX = Math.max(0, Math.min(msg.bitmap.width - side, Math.round(cx - side / 2)));
+          const srcY = Math.max(0, Math.min(msg.bitmap.height - side, Math.round(cy - side / 2)));
+          const roiFrame = preprocess(msg.bitmap, {
+            srcX,
+            srcY,
+            srcW: Math.min(side, msg.bitmap.width - srcX),
+            srcH: Math.min(side, msg.bitmap.height - srcY),
+          });
+          const roiResults = await session.run({ [session.inputNames[0]]: roiFrame.tensor });
+          const roiDet = parseBestBall(
+            roiResults[session.outputNames[0]],
+            msg.origWidth,
+            msg.origHeight,
+            msg.timestampMs,
+            roiFrame,
+            Math.max(0.11, confThreshold - 0.05),
+          );
+          if (
+            roiDet &&
+            Math.hypot(roiDet.x - msg.predictedRoi.x, roiDet.y - msg.predictedRoi.y) <= msg.predictedRoi.radius
+          ) {
+            detection = roiDet;
+          }
+        }
         const action = msg.detectAction ? await inferActionPhase(msg.bitmap) : null;
         workerScope.postMessage({
           type: 'RESULT',

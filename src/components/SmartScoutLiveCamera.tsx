@@ -91,7 +91,8 @@ interface SmartScoutLiveCameraProps {
     bitmap: ImageBitmap,
     timestampMs: number,
     width: number,
-    height: number
+    height: number,
+    predictedRoi?: { x: number; y: number; radius: number }
   ) => void;
   onPoseFrame?: (
     bitmap: ImageBitmap,
@@ -528,7 +529,23 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         }
         sentTimestamps.add(timestampMs);
         try {
-          onFrame(bitmap, timestampMs, region ? bitmap.width : w, region ? bitmap.height : h);
+          // 球體飛行中（已有 >= 2 幀）推算下一幀預測位置，供 Worker 在遠端小球縮小漏抓時自動 2.8x 局部放大補抓
+          let predictedRoi: { x: number; y: number; radius: number } | undefined;
+          const trk = activeTrackRef.current;
+          if (!region && trk.length >= 2) {
+            const p1 = trk[trk.length - 2];
+            const p2 = trk[trk.length - 1];
+            const dtNow = timestampMs - p2.timestampMs;
+            const dtPrev = Math.max(1, p2.timestampMs - p1.timestampMs);
+            if (dtNow > 0 && dtNow <= 220) {
+              predictedRoi = {
+                x: p2.x + ((p2.x - p1.x) / dtPrev) * dtNow,
+                y: p2.y + ((p2.y - p1.y) / dtPrev) * dtNow,
+                radius: Math.max(54, w * 0.14),
+              };
+            }
+          }
+          onFrame(bitmap, timestampMs, region ? bitmap.width : w, region ? bitmap.height : h, predictedRoi);
         } catch (error) {
           bitmap.close();
           throw error;

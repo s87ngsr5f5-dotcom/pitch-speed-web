@@ -144,6 +144,8 @@ export type WorkerInMessage =
       origHeight: number;
       detectAction?: boolean;
       detectPose?: boolean;
+      /** 球體飛行中且全畫面漏抓遠端小球時，以此預測中心進行 2.8x 局部放大追焦 */
+      predictedRoi?: { x: number; y: number; radius: number };
     };
 
 export type WorkerOutMessage =

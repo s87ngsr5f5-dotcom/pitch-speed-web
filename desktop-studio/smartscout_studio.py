@@ -672,6 +672,24 @@ def scan_video(
                 ]
                 if near:
                     chosen = min(near, key=lambda c: math.hypot(c[0] - pred_x, c[1] - pred_y))
+                elif 0 <= idx < len(frames):
+                    # 球飛向本壘變小被全畫面漏掉時，以預測落點做 2.8x 局部放大補抓
+                    side = int(max(160, min(w, h) * 0.36))
+                    rx1 = max(0, min(w - side, int(pred_x - side * 0.5)))
+                    ry1 = max(0, min(h - side, int(pred_y - side * 0.5)))
+                    roi_cands = detector.detect_topk(
+                        frames[idx][ry1 : ry1 + side, rx1 : rx1 + side],
+                        conf_thresh=max(0.12, thresh - 0.10),
+                        max_k=3,
+                    )
+                    roi_mapped = [
+                        (c[0] + rx1, c[1] + ry1, c[2], c[3], c[4])
+                        for c in roi_cands
+                        if max(c[2] / max(1.0, c[3]), c[3] / max(1.0, c[2])) <= 2.4
+                        and math.hypot((c[0] + rx1) - pred_x, (c[1] + ry1) - pred_y) <= max(46.0, w * 0.14)
+                    ]
+                    if roi_mapped:
+                        chosen = min(roi_mapped, key=lambda c: math.hypot(c[0] - pred_x, c[1] - pred_y))
             if chosen is None and not (len(dets) >= 4 and in_flight):
                 high = [c for c in dyn if c[4] >= thresh]
                 if high:
