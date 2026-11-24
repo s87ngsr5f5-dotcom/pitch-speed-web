@@ -22,6 +22,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var modelMode: DetectorModelMode = .highRes640
     @Published var cameraAngle: CameraAngleMode = .behindPitcher
     @Published var distanceMeters: Double = 18.44
+    @Published var preferredFps: Int = 60
     @Published var autoSaveToPhotos: Bool = true
     @Published var voiceAnnounce: Bool = true
 
@@ -67,6 +68,30 @@ final class CameraManager: NSObject, ObservableObject {
         statusText = "\(activeFps)fps \(target.label) 連續測速中"
     }
 
+    /// 切換投球距離：18.44m（成棒/青棒）→ 16.0m（青少棒）→ 14.0m（少棒）
+    func cycleDistance() {
+        if abs(distanceMeters - 18.44) < 0.1 {
+            distanceMeters = 16.0
+        } else if abs(distanceMeters - 16.0) < 0.1 {
+            distanceMeters = 14.0
+        } else {
+            distanceMeters = 18.44
+        }
+    }
+
+    /// 切換 60fps / 120fps 高速錄影（若裝置支援 120fps，時間誤差可減半）
+    func toggleHighSpeedFps() {
+        preferredFps = (preferredFps == 60) ? 120 : 60
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            self.finishCurrentSegment(saveToPhotos: false)
+            if self.session.isRunning { self.session.stopRunning() }
+            for input in self.session.inputs { self.session.removeInput(input) }
+            for output in self.session.outputs { self.session.removeOutput(output) }
+            self.configureSession()
+        }
+    }
+
     func start() {
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             guard let self else { return }
@@ -104,17 +129,21 @@ final class CameraManager: NSObject, ObservableObject {
         }
         session.addInput(input)
 
+        let targetFps = Double(preferredFps)
         var chosenFormat: AVCaptureDevice.Format?
         var chosenFps: Double = 60.0
         for format in device.formats {
             let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             guard dims.width >= 1280, dims.width <= 1920 else { continue }
             for range in format.videoSupportedFrameRateRanges {
-                if range.maxFrameRate >= 60.0 {
+                if range.maxFrameRate >= targetFps {
                     if chosenFormat == nil || dims.width == 1280 {
                         chosenFormat = format
-                        chosenFps = min(60.0, range.maxFrameRate)
+                        chosenFps = min(targetFps, range.maxFrameRate)
                     }
+                } else if chosenFormat == nil && range.maxFrameRate >= 60.0 {
+                    chosenFormat = format
+                    chosenFps = min(60.0, range.maxFrameRate)
                 }
             }
         }
@@ -479,13 +508,33 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let cands = detector.detectTopK(pixelBuffer: pb, timestampMs: tsMs, mode: mode)
         updateLiveStaticBins(candidates: cands)
 
-        guard let det = selectBestDynamicCandidate(
+        var det = selectBestDynamicCandidate(
             candidates: cands,
             staticCounts: binCounts,
             track: activeTrack,
             frameWidth: CGFloat(w),
             primaryConf: mode.defaultConfidence
-        ) else { return }
+        )
+        // 球飛向本壘縮小被全畫面漏抓時，自動以預測落點做 2.8x 局部放大追焦
+        if det == nil, activeTrack.count >= 2 {
+            let p1 = activeTrack[activeTrack.count - 2]
+            let p2 = activeTrack[activeTrack.count - 1]
+            let dtNow = tsMs - p2.timestampMs
+            let dtPrev = max(1.0, p2.timestampMs - p1.timestampMs)
+            if dtNow > 0 && dtNow <= PitchPhysicsEngine.maxSampleGapMs {
+                let predX = p2.x + ((p2.x - p1.x) / CGFloat(dtPrev)) * CGFloat(dtNow)
+                let predY = p2.y + ((p2.y - p1.y) / CGFloat(dtPrev)) * CGFloat(dtNow)
+                det = detector.detectInROI(
+                    pixelBuffer: pb,
+                    timestampMs: tsMs,
+                    mode: mode,
+                    predX: predX,
+                    predY: predY,
+                    radius: max(50.0, CGFloat(w) * 0.14)
+                )
+            }
+        }
+        guard let det else { return }
         // 屏蔽前景投手白球褲反光誤判
         if poseGate.isInsidePitcherPants(
             x: det.x,

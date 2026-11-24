@@ -159,7 +159,17 @@ export function estimateAutomaticPitchFlight({
           const releasePadMs = s === segStart && steps[s]?.dt > 45 ? 33.37 : 0;
           const catchPadMs =
             e === segEnd && steps[e - 1]?.dt > 45 && sizeRatio >= 1.50 ? 33.37 : 0;
-          const flightTimeMs = lastDet.timestampMs - firstDet.timestampMs - releasePadMs - catchPadMs;
+          // 亞幀進手套端點修正：若最後一步位移明顯小於前一步，扣除球已落入捕手手套的死時間
+          let subCatchTrimMs = 0;
+          if (e - s >= 3) {
+            const dLast = Math.hypot(detections[e].x - detections[e - 1].x, detections[e].y - detections[e - 1].y);
+            const dPrev = Math.hypot(detections[e - 1].x - detections[e - 2].x, detections[e - 1].y - detections[e - 2].y);
+            const dtLast = detections[e].timestampMs - detections[e - 1].timestampMs;
+            if (dPrev > 1 && dLast < dPrev * 0.85 && dtLast > 0 && dtLast <= 50) {
+              subCatchTrimMs = dtLast * Math.max(0, 1 - dLast / dPrev) * 0.65;
+            }
+          }
+          const flightTimeMs = lastDet.timestampMs - firstDet.timestampMs - releasePadMs - catchPadMs - subCatchTrimMs;
           const speedKmh = (distance * 3600) / flightTimeMs / 0.955;
           const segTrack = detections.slice(s, e + 1);
           const meanConf = segTrack.reduce((acc, d) => acc + d.confidence, 0) / Math.max(1, segTrack.length);

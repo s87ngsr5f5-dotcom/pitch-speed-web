@@ -237,7 +237,15 @@ def estimate_pitch_segments(
                 is_oblique = span >= 0.14 and (size_ratio >= 1.12 or (e - s) >= 7)
                 rel_pad = 33.37 if (s == seg_start and steps[s][2] > 45) else 0.0
                 cat_pad = 33.37 if (e == seg_end and steps[e - 1][2] > 45 and size_ratio >= 1.50) else 0.0
-                flight_ms = d_last.timestamp_ms - d_first.timestamp_ms - rel_pad - cat_pad
+                # 亞幀進手套端點修正：若最後一步位移明顯小於前一步，扣除球已停在捕手手套內的死時間
+                sub_catch_trim = 0.0
+                if e - s >= 3:
+                    d_last_step = math.hypot(dets[e].x - dets[e - 1].x, dets[e].y - dets[e - 1].y)
+                    d_prev_step = math.hypot(dets[e - 1].x - dets[e - 2].x, dets[e - 1].y - dets[e - 2].y)
+                    dt_last = dets[e].timestamp_ms - dets[e - 1].timestamp_ms
+                    if d_prev_step > 1.0 and d_last_step < d_prev_step * 0.85 and 0 < dt_last <= 50.0:
+                        sub_catch_trim = dt_last * max(0.0, 1.0 - d_last_step / d_prev_step) * 0.65
+                flight_ms = d_last.timestamp_ms - d_first.timestamp_ms - rel_pad - cat_pad - sub_catch_trim
                 if 320.0 <= flight_ms <= 920.0:
                     spd = (flight_dist * 3600.0) / flight_ms / 0.955
                     seg_dets = dets[s : e + 1]

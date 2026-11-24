@@ -203,7 +203,17 @@ final class PitchPhysicsEngine {
                     let isOblique = sizeRatio >= 1.12 && span >= 0.12
                     let relPad = (s == segStart && steps[s].dt > 45) ? 33.37 : 0.0
                     let catPad = (e == segEnd && steps[e - 1].dt > 45 && sizeRatio >= 1.50) ? 33.37 : 0.0
-                    let flightMs = lastDet.timestampMs - firstDet.timestampMs - relPad - catPad
+                    // 亞幀進手套端點修正：扣除最後一幀球已落入捕手手套的死時間
+                    var subCatchTrim = 0.0
+                    if e - s >= 3 {
+                        let dLast = Double(hypot(detections[e].x - detections[e - 1].x, detections[e].y - detections[e - 1].y))
+                        let dPrev = Double(hypot(detections[e - 1].x - detections[e - 2].x, detections[e - 1].y - detections[e - 2].y))
+                        let dtLast = detections[e].timestampMs - detections[e - 1].timestampMs
+                        if dPrev > 1.0 && dLast < dPrev * 0.85 && dtLast > 0 && dtLast <= 50.0 {
+                            subCatchTrim = dtLast * max(0.0, 1.0 - dLast / dPrev) * 0.65
+                        }
+                    }
+                    let flightMs = lastDet.timestampMs - firstDet.timestampMs - relPad - catPad - subCatchTrim
                     if flightMs >= 320 && flightMs <= 920 {
                         let spd = (flightDistance * 3600.0) / flightMs / 0.955
                         if (isDepth || isOblique) && spd >= 45 && spd <= 158 {

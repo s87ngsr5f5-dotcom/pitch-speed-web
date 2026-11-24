@@ -167,6 +167,28 @@ struct ContentView: View {
                     .background(Color.black.opacity(0.62), in: Capsule())
             }
 
+            Button {
+                camera.cycleDistance()
+            } label: {
+                Text(String(format: "%.2gm", camera.distanceMeters))
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.62), in: Capsule())
+                    .foregroundColor(.cyan)
+            }
+
+            Button {
+                camera.toggleHighSpeedFps()
+            } label: {
+                Text("\(camera.activeFps)fps")
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.62), in: Capsule())
+                    .foregroundColor(camera.activeFps >= 120 ? .orange : .white)
+            }
+
             Spacer()
 
             Button {

@@ -213,12 +213,111 @@ final class CoreMLBallDetector {
             let bw = bwIn * sx
             let bh = bhIn * sy
             let ny = cy / srcH
-            guard ny >= 0.08, ny <= 0.78, bw <= srcW * 0.14, bh <= srcH * 0.10 else { continue }
+            let aspect = max(bw / max(1, bh), bh / max(1, bw))
+            guard ny >= 0.08, ny <= 0.78, aspect <= 2.4, bw <= srcW * 0.14, bh <= srcH * 0.10 else { continue }
             if picked.contains(where: { hypot(cx - $0.x, cy - $0.y) < minDist }) { continue }
             picked.append(BallDetectionSample(timestampMs: timestampMs, x: cx, y: cy, width: bw, height: bh, confidence: sc))
             if picked.count >= maxK { break }
         }
         return picked
+    }
+
+    /// 遠端小球 2.8 倍局部放大追焦（以預測落點為中心裁切 36% 方塊，再用 ANE 補抓縮小至 4–8px 的遠端球）
+    func detectInROI(
+        pixelBuffer: CVPixelBuffer,
+        timestampMs: Double,
+        mode: DetectorModelMode,
+        predX: CGFloat,
+        predY: CGFloat,
+        radius: CGFloat
+    ) -> BallDetectionSample? {
+        guard let entry = loadedModels[mode] ?? loadedModels[.highRes640] ?? loadedModels[.fast320] else {
+            return nil
+        }
+        let srcW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let srcH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        guard srcW > 0, srcH > 0 else { return nil }
+
+        let side = max(160.0, min(srcW, srcH) * 0.36)
+        let rx1 = max(0, min(srcW - side, predX - side * 0.5))
+        let ry1 = max(0, min(srcH - side, predY - side * 0.5))
+        let cropW = min(side, srcW - rx1)
+        let cropH = min(side, srcH - ry1)
+
+        // CIImage 原點在左下角，須把 top-down 的 ry1 轉成 bottom-up
+        let ciY = max(0, srcH - (ry1 + cropH))
+        let cropped = CIImage(cvPixelBuffer: pixelBuffer)
+            .cropped(to: CGRect(x: rx1, y: ciY, width: cropW, height: cropH))
+            .transformed(by: CGAffineTransform(translationX: -rx1, y: -ciY))
+
+        let inputSize = entry.inputSize
+        let size = CGFloat(inputSize)
+        let scale = min(size / cropW, size / cropH)
+        let newW = (cropW * scale).rounded()
+        let newH = (cropH * scale).rounded()
+        let padX = floor((size - newW) / 2.0)
+        let padY = floor((size - newH) / 2.0)
+
+        var dst: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+        ]
+        CVPixelBufferCreate(kCFAllocatorDefault, inputSize, inputSize, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &dst)
+        guard let outputBuffer = dst else { return nil }
+
+        let gray = CIImage(color: CIColor(red: 114.0/255.0, green: 114.0/255.0, blue: 114.0/255.0))
+            .cropped(to: CGRect(x: 0, y: 0, width: inputSize, height: inputSize))
+        let composed = cropped
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .transformed(by: CGAffineTransform(translationX: padX, y: padY))
+            .composited(over: gray)
+        ciContext.render(composed, to: outputBuffer)
+
+        guard let provider = try? MLDictionaryFeatureProvider(
+            dictionary: [entry.inputFeatureName: MLFeatureValue(pixelBuffer: outputBuffer)]
+        ),
+        let output = try? entry.model.prediction(from: provider),
+        let multiArray = output.featureValue(for: entry.outputFeatureName)?.multiArrayValue else {
+            return nil
+        }
+
+        let thresh: Float = max(0.12, mode.defaultConfidence - 0.10)
+        let shape = multiArray.shape.map { $0.intValue }
+        guard shape.count == 3 else { return nil }
+        let isChannelsLast = shape[2] == 5 || shape[2] == 84
+        let anchors = isChannelsLast ? shape[1] : shape[2]
+        let channels = isChannelsLast ? shape[2] : shape[1]
+        let targetClassIdx = (channels - 4) == 1 ? 0 : 32
+        guard targetClassIdx < (channels - 4) else { return nil }
+
+        let sx = cropW / max(1, newW)
+        let sy = cropH / max(1, newH)
+        var best: BallDetectionSample?
+        var bestDist = radius
+
+        for i in 0..<anchors {
+            let sc: Float = isChannelsLast
+                ? multiArray[[0, i, 4 + targetClassIdx] as [NSNumber]].floatValue
+                : multiArray[[0, 4 + targetClassIdx, i] as [NSNumber]].floatValue
+            guard sc >= thresh else { continue }
+            let cxIn = CGFloat(isChannelsLast ? multiArray[[0, i, 0] as [NSNumber]].floatValue : multiArray[[0, 0, i] as [NSNumber]].floatValue)
+            let cyIn = CGFloat(isChannelsLast ? multiArray[[0, i, 1] as [NSNumber]].floatValue : multiArray[[0, 1, i] as [NSNumber]].floatValue)
+            let bwIn = CGFloat(isChannelsLast ? multiArray[[0, i, 2] as [NSNumber]].floatValue : multiArray[[0, 2, i] as [NSNumber]].floatValue)
+            let bhIn = CGFloat(isChannelsLast ? multiArray[[0, i, 3] as [NSNumber]].floatValue : multiArray[[0, 3, i] as [NSNumber]].floatValue)
+            let cx = rx1 + (cxIn - padX) * sx
+            let cy = ry1 + (cyIn - padY) * sy
+            let bw = bwIn * sx
+            let bh = bhIn * sy
+            let aspect = max(bw / max(1, bh), bh / max(1, bw))
+            guard aspect <= 2.4 else { continue }
+            let d = hypot(cx - predX, cy - predY)
+            if d <= bestDist {
+                bestDist = d
+                best = BallDetectionSample(timestampMs: timestampMs, x: cx, y: cy, width: bw, height: bh, confidence: sc)
+            }
+        }
+        return best
     }
 
     private func makeLetterboxedPixelBuffer(
