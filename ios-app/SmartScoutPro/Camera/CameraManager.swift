@@ -1,7 +1,9 @@
 import AVFoundation
 import Foundation
 import Photos
+import QuartzCore
 import SwiftUI
+import UIKit
 import Vision
 
 /// Continuous 60fps rear camera + CoreML Apple Neural Engine 640px/320px ball tracker +
@@ -231,7 +233,11 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func finishCurrentSegment(saveToPhotos: Bool, completion: ((Bool) -> Void)? = nil) {
+    private func finishCurrentSegment(
+        saveToPhotos: Bool,
+        pitchForBurnIn: MeasuredPitch? = nil,
+        completion: ((Bool) -> Void)? = nil
+    ) {
         guard let writer = assetWriter, let url = currentSegmentUrl else {
             completion?(false)
             return
@@ -247,7 +253,11 @@ final class CameraManager: NSObject, ObservableObject {
                     self?.isRotatingWriter = false
                 }
                 if saveToPhotos {
-                    self?.saveVideoToPhotosLibrary(url: url, completion: completion)
+                    if let pitch = pitchForBurnIn {
+                        self?.burnOverlayAndSaveToPhotos(inputUrl: url, pitch: pitch, completion: completion)
+                    } else {
+                        self?.saveVideoToPhotosLibrary(url: url, completion: completion)
+                    }
                 } else {
                     try? FileManager.default.removeItem(at: url)
                     completion?(false)
@@ -257,6 +267,164 @@ final class CameraManager: NSObject, ObservableObject {
             isRotatingWriter = false
             try? FileManager.default.removeItem(at: url)
             completion?(false)
+        }
+    }
+
+    /// 背景硬體 H.264 燒錄「3D 漸細紅軌跡＋數據卡」後直接存入 iPhone 相簿（完全不中斷相機）
+    private func burnOverlayAndSaveToPhotos(
+        inputUrl: URL,
+        pitch: MeasuredPitch,
+        completion: ((Bool) -> Void)?
+    ) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let asset = AVURLAsset(url: inputUrl)
+            guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+                self?.saveVideoToPhotosLibrary(url: inputUrl, completion: completion)
+                return
+            }
+            let composition = AVMutableComposition()
+            guard let compTrack = composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                self?.saveVideoToPhotosLibrary(url: inputUrl, completion: completion)
+                return
+            }
+            let duration = asset.duration
+            do {
+                try compTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
+            } catch {
+                self?.saveVideoToPhotosLibrary(url: inputUrl, completion: completion)
+                return
+            }
+
+            let renderSize = videoTrack.naturalSize
+            let w = renderSize.width
+            let h = renderSize.height
+            guard w > 0, h > 0 else {
+                self?.saveVideoToPhotosLibrary(url: inputUrl, completion: completion)
+                return
+            }
+
+            // 建立 CoreAnimation 疊層（原點在左下角，需把 top-down 正規化 y 轉成 1 - y）
+            let parentLayer = CALayer()
+            parentLayer.frame = CGRect(x: 0, y: 0, width: w, height: h)
+            let videoLayer = CALayer()
+            videoLayer.frame = parentLayer.frame
+            let overlayLayer = CALayer()
+            overlayLayer.frame = parentLayer.frame
+
+            // 1. 繪製 3D 漸細紅色彩帶軌跡
+            let p0 = CGPoint(x: pitch.ribbon.startX * w, y: (1 - pitch.ribbon.startY) * h)
+            let p1 = CGPoint(x: pitch.ribbon.ctrlX * w, y: (1 - pitch.ribbon.ctrlY) * h)
+            let p2 = CGPoint(x: pitch.ribbon.endX * w, y: (1 - pitch.ribbon.endY) * h)
+            let behindPitcher = pitch.cameraAngle == .behindPitcher
+            let startR: CGFloat = behindPitcher ? w * 0.030 : w * 0.008
+            let endR: CGFloat = behindPitcher ? w * 0.008 : w * 0.030
+            let steps = 28
+            var pts: [CGPoint] = []
+            var radii: [CGFloat] = []
+            for i in 0...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                let inv = 1 - t
+                pts.append(CGPoint(
+                    x: inv * inv * p0.x + 2 * inv * t * p1.x + t * t * p2.x,
+                    y: inv * inv * p0.y + 2 * inv * t * p1.y + t * t * p2.y
+                ))
+                radii.append(startR + (endR - startR) * t)
+            }
+            var leftPts: [CGPoint] = []
+            var rightPts: [CGPoint] = []
+            for idx in 0..<pts.count {
+                let prev = pts[max(0, idx - 1)]
+                let next = pts[min(pts.count - 1, idx + 1)]
+                let tx = next.x - prev.x
+                let ty = next.y - prev.y
+                let len = max(0.001, hypot(tx, ty))
+                let nx = -ty / len
+                let ny = tx / len
+                let r = radii[idx]
+                leftPts.append(CGPoint(x: pts[idx].x + nx * r, y: pts[idx].y + ny * r))
+                rightPts.append(CGPoint(x: pts[idx].x - nx * r, y: pts[idx].y - ny * r))
+            }
+            let ribbonCG = CGMutablePath()
+            if let first = leftPts.first {
+                ribbonCG.move(to: first)
+                for p in leftPts.dropFirst() { ribbonCG.addLine(to: p) }
+                for p in rightPts.reversed() { ribbonCG.addLine(to: p) }
+                ribbonCG.closeSubpath()
+            }
+            let ribbonLayer = CAShapeLayer()
+            ribbonLayer.path = ribbonCG
+            ribbonLayer.fillColor = UIColor(red: 0.94, green: 0.22, blue: 0.24, alpha: 0.86).cgColor
+            overlayLayer.addSublayer(ribbonLayer)
+
+            // 2. 繪製底部深色半透明 SmartScout 數據卡
+            let cardH = max(120, h * 0.145)
+            let cardMargin = w * 0.04
+            let cardLayer = CALayer()
+            cardLayer.frame = CGRect(x: cardMargin, y: cardMargin, width: w - cardMargin * 2, height: cardH)
+            cardLayer.backgroundColor = UIColor(white: 0.06, alpha: 0.78).cgColor
+            cardLayer.cornerRadius = 18
+            cardLayer.borderWidth = 1.5
+            cardLayer.borderColor = UIColor(white: 1.0, alpha: 0.16).cgColor
+
+            let titleText = CATextLayer()
+            titleText.string = String(format: "%.1f km/h   ·   %@", pitch.speedKmh, pitch.pitchType)
+            titleText.fontSize = max(24, w * 0.048)
+            titleText.foregroundColor = UIColor.white.cgColor
+            titleText.alignmentMode = .left
+            titleText.contentsScale = 2.0
+            titleText.frame = CGRect(x: 20, y: cardH * 0.48, width: cardLayer.bounds.width - 40, height: cardH * 0.42)
+            cardLayer.addSublayer(titleText)
+
+            let subText = CATextLayer()
+            subText.string = String(
+                format: "VB %+.1f cm  |  HB %+.1f cm  |  %d rpm  |  效率 %d%%  |  SD %@",
+                pitch.verticalBreakCm, pitch.horizontalBreakCm, pitch.totalSpinRpm, pitch.efficiencyPct, pitch.spinDirection
+            )
+            subText.fontSize = max(14, w * 0.025)
+            subText.foregroundColor = UIColor(white: 0.85, alpha: 0.95).cgColor
+            subText.alignmentMode = .left
+            subText.contentsScale = 2.0
+            subText.frame = CGRect(x: 20, y: cardH * 0.12, width: cardLayer.bounds.width - 40, height: cardH * 0.34)
+            cardLayer.addSublayer(subText)
+
+            overlayLayer.addSublayer(cardLayer)
+            parentLayer.addSublayer(videoLayer)
+            parentLayer.addSublayer(overlayLayer)
+
+            let videoComp = AVMutableVideoComposition()
+            videoComp.renderSize = renderSize
+            videoComp.frameDuration = CMTime(value: 1, timescale: 60)
+            videoComp.animationTool = AVVideoCompositionCoreAnimationTool(
+                postProcessingAsVideoLayer: videoLayer,
+                in: parentLayer
+            )
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
+            instruction.layerInstructions = [layerInstruction]
+            videoComp.instructions = [instruction]
+
+            let outUrl = FileManager.default.temporaryDirectory
+                .appendingPathComponent("smartscout_burn_\(UUID().uuidString).mp4")
+            guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+                self?.saveVideoToPhotosLibrary(url: inputUrl, completion: completion)
+                return
+            }
+            exporter.outputURL = outUrl
+            exporter.outputFileType = .mp4
+            exporter.videoComposition = videoComp
+            exporter.exportAsynchronously { [weak self] in
+                try? FileManager.default.removeItem(at: inputUrl)
+                if exporter.status == .completed {
+                    self?.saveVideoToPhotosLibrary(url: outUrl, completion: completion)
+                } else {
+                    try? FileManager.default.removeItem(at: outUrl)
+                    completion?(false)
+                }
+            }
         }
     }
 
@@ -471,7 +639,7 @@ final class CameraManager: NSObject, ObservableObject {
 
             self.nextPitchNumber += 1
             let shouldSave = self.autoSaveToPhotos
-            self.finishCurrentSegment(saveToPhotos: shouldSave) { saved in
+            self.finishCurrentSegment(saveToPhotos: shouldSave, pitchForBurnIn: measured) { saved in
                 var finalPitch = measured
                 finalPitch.savedToPhotos = saved
                 DispatchQueue.main.async {

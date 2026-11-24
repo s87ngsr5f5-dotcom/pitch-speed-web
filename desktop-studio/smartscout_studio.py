@@ -16,6 +16,7 @@ import argparse
 import csv
 import json
 import math
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -617,10 +618,15 @@ def scan_video(
             strong = [e for e in release_events if e.peak_score >= 3.5] or release_events
             allowed_frames = set()
             for ev in strong:
-                for f_i in range(ev.window_start_frame, ev.window_end_frame + 1):
-                    allowed_frames.add(f_i)
+                start = ev.window_start_frame
+                if (len(frames) - 1 - ev.release_frame) / fps < 0.45:
+                    # A cropped replay can make the follow-through look like a late release.
+                    # Include earlier detections while keeping the ball and trajectory filters.
+                    start = max(0, start - round(0.9 * fps))
+                    print(f"  [投手動作閘門] 第 {ev.release_frame} 幀接近片尾，搜尋提前至第 {start} 幀", flush=True)
+                allowed_frames.update(range(start, ev.window_end_frame + 1))
             ev_summary = ", ".join(f"f{e.release_frame}({e.throwing_hand}HP)" for e in strong)
-            print(f"  [投手動作閘門] 鎖定出手窗口: {ev_summary}（準備期／抬腿期已鎖死不測速）", flush=True)
+            print(f"  [投手動作閘門] 鎖定出手窗口: {ev_summary}（以棒球模型和軌跡條件確認）", flush=True)
 
     order = []
     if prefer_640 and det_640 is not None:
@@ -654,21 +660,33 @@ def scan_video(
 
         dets: List[Detection] = []
         for idx, cands in enumerate(per_frame_cands):
-            st = pose_states[idx] if (pose_states is not None and idx < len(pose_states)) else None
-            dyn = [
-                c for c in cands
-                if grid_counts.get((int(c[0] // 14), int(c[1] // 14)), 0) < 6
-                and max(c[2] / max(1.0, c[3]), c[3] / max(1.0, c[2])) <= 2.4
-                and not (
-                    PitcherPoseGate is not None
-                    and PitcherPoseGate.is_inside_pitcher_pants(st, c[0], c[1], max(c[2], c[3]), len(dets))
+            if allowed_frames is not None and idx not in allowed_frames:
+                continue
+            st = pose_states[idx] if pose_states is not None and idx < len(pose_states) else None
+
+            def plausible_ball(candidate: Tuple[float, float, float, float, float]) -> bool:
+                x, y, bw, bh, _ = candidate
+                return (
+                    0 <= x < w and h * 0.08 <= y <= h * 0.78
+                    and 0 < bw <= w * 0.14 and 0 < bh <= h * 0.10
+                    and max(bw, bh) <= 2.4 * min(bw, bh)
+                    and grid_counts.get((int(x // 14), int(y // 14)), 0) < 6
+                    and not (
+                        PitcherPoseGate is not None
+                        and PitcherPoseGate.is_inside_pitcher_pants(st, x, y, max(bw, bh), len(dets))
+                    )
                 )
-            ]
+
+            dyn = [candidate for candidate in cands if plausible_ball(candidate)]
             if not dyn:
                 continue
             ts = round(idx * 1000.0 / fps, 2)
             chosen = None
-            in_flight = len(dets) >= 2 and (ts - dets[-1].timestamp_ms) <= MAX_PITCH_SAMPLE_GAP_MS
+            in_flight = (
+                len(dets) >= 2
+                and ts - dets[-1].timestamp_ms <= MAX_PITCH_SAMPLE_GAP_MS
+                and dets[-1].timestamp_ms - dets[-2].timestamp_ms <= MAX_PITCH_SAMPLE_GAP_MS
+            )
             if in_flight:
                 dt_prev = max(1.0, dets[-1].timestamp_ms - dets[-2].timestamp_ms)
                 dt_now = ts - dets[-1].timestamp_ms
@@ -682,9 +700,9 @@ def scan_video(
                 ]
                 if near:
                     chosen = min(near, key=lambda c: math.hypot(c[0] - pred_x, c[1] - pred_y))
-                elif 0 <= idx < len(frames):
+                else:
                     # 球飛向本壘變小被全畫面漏掉時，以預測落點做 2.8x 局部放大補抓
-                    side = int(max(160, min(w, h) * 0.36))
+                    side = min(w, h, int(max(160, min(w, h) * 0.36)))
                     rx1 = max(0, min(w - side, int(pred_x - side * 0.5)))
                     ry1 = max(0, min(h - side, int(pred_y - side * 0.5)))
                     roi_cands = detector.detect_topk(
@@ -692,11 +710,11 @@ def scan_video(
                         conf_thresh=max(0.12, thresh - 0.10),
                         max_k=3,
                     )
+                    roi_mapped = [(x + rx1, y + ry1, bw, bh, score) for x, y, bw, bh, score in roi_cands]
                     roi_mapped = [
-                        (c[0] + rx1, c[1] + ry1, c[2], c[3], c[4])
-                        for c in roi_cands
-                        if max(c[2] / max(1.0, c[3]), c[3] / max(1.0, c[2])) <= 2.4
-                        and math.hypot((c[0] + rx1) - pred_x, (c[1] + ry1) - pred_y) <= max(46.0, w * 0.14)
+                        c for c in roi_mapped
+                        if plausible_ball(c)
+                        and math.hypot(c[0] - pred_x, c[1] - pred_y) <= max(46.0, w * 0.14)
                     ]
                     if roi_mapped:
                         chosen = min(roi_mapped, key=lambda c: math.hypot(c[0] - pred_x, c[1] - pred_y))
@@ -718,6 +736,120 @@ def scan_video(
             return segs, fps, w, h, label
 
     return [], fps, w, h, "none"
+
+
+def generate_scout_report_png(results: List[PitchResult], out_png: Path) -> None:
+    """產出 1280x720 暗黑球探報表 PNG（左：球速折線趨勢圖；右：九宮格好球帶進壘分布圖）。"""
+    if not results:
+        return
+    W, H = 1280, 720
+    canvas = np.full((H, W, 3), (18, 22, 30), dtype=np.uint8)
+
+    speeds = [r.speed_kmh for r in results]
+    avg_spd = sum(speeds) / len(speeds)
+    max_spd = max(speeds)
+    strike_pct = 100.0 * sum(1 for r in results if r.is_strike) / len(results)
+
+    # 頂部統計橫幅
+    cv2.rectangle(canvas, (28, 24), (W - 28, 118), (28, 34, 46), -1)
+    cv2.rectangle(canvas, (28, 24), (W - 28, 118), (64, 78, 102), 1)
+    cv2.putText(canvas, "SMARTSCOUT AI  |  SESSION SCOUT REPORT", (52, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (240, 245, 255), 2, cv2.LINE_AA)
+    summary_line = (
+        f"Pitches: {len(results)}   |   Max: {max_spd:.1f} km/h   |   "
+        f"Avg: {avg_spd:.1f} km/h   |   Strike: {strike_pct:.0f}%"
+    )
+    cv2.putText(canvas, summary_line, (52, 98), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (56, 189, 248), 2, cv2.LINE_AA)
+
+    # 左側面板：球速折線趨勢圖
+    lx1, ly1, lx2, ly2 = 40, 148, 760, 676
+    cv2.rectangle(canvas, (lx1, ly1), (lx2, ly2), (24, 30, 41), -1)
+    cv2.rectangle(canvas, (lx1, ly1), (lx2, ly2), (55, 68, 90), 1)
+    cv2.putText(canvas, "Velocity Trend (km/h)", (lx1 + 20, ly1 + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (226, 232, 240), 2, cv2.LINE_AA)
+
+    gx1, gy1, gx2, gy2 = lx1 + 64, ly1 + 64, lx2 - 36, ly2 - 52
+    y_min = max(60.0, math.floor((min(speeds) - 10.0) / 10.0) * 10.0)
+    y_max = math.ceil((max(speeds) + 10.0) / 10.0) * 10.0
+    if y_max <= y_min:
+        y_max = y_min + 20.0
+    for k in range(5):
+        frac = k / 4.0
+        yy = int(gy2 - frac * (gy2 - gy1))
+        val = y_min + frac * (y_max - y_min)
+        cv2.line(canvas, (gx1, yy), (gx2, yy), (45, 55, 72), 1)
+        cv2.putText(canvas, f"{val:.0f}", (lx1 + 14, yy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (148, 163, 184), 1, cv2.LINE_AA)
+
+    pts = []
+    n = len(results)
+    for i, r in enumerate(results):
+        px = int(gx1 + (gx2 - gx1) * (i / max(1, n - 1))) if n > 1 else (gx1 + gx2) // 2
+        py = int(gy2 - (r.speed_kmh - y_min) / (y_max - y_min) * (gy2 - gy1))
+        pts.append((px, py))
+    for i in range(1, len(pts)):
+        cv2.line(canvas, pts[i - 1], pts[i], (56, 189, 248), 3, cv2.LINE_AA)
+    for i, ((px, py), r) in enumerate(zip(pts, results), start=1):
+        col = (60, 80, 245) if r.is_strike else (80, 195, 250)
+        cv2.circle(canvas, (px, py), 8, col, -1, cv2.LINE_AA)
+        cv2.circle(canvas, (px, py), 8, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, f"{r.speed_kmh:.1f}", (px - 22, py - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (248, 250, 252), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"#{i}", (px - 10, gy2 + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (148, 163, 184), 1, cv2.LINE_AA)
+
+    # 右側面板：九宮格好球帶進壘分布圖
+    rx1, ry1, rx2, ry2 = 790, 148, W - 40, 676
+    cv2.rectangle(canvas, (rx1, ry1), (rx2, ry2), (24, 30, 41), -1)
+    cv2.rectangle(canvas, (rx1, ry1), (rx2, ry2), (55, 68, 90), 1)
+    cv2.putText(canvas, "Strike Zone Location", (rx1 + 20, ry1 + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (226, 232, 240), 2, cv2.LINE_AA)
+
+    zx1, zy1, zx2, zy2 = rx1 + 105, ry1 + 115, rx2 - 105, ry2 - 105
+    cv2.rectangle(canvas, (zx1, zy1), (zx2, zy2), (226, 232, 240), 2)
+    for k in (1, 2):
+        vx = zx1 + int((zx2 - zx1) * k / 3.0)
+        hy = zy1 + int((zy2 - zy1) * k / 3.0)
+        cv2.line(canvas, (vx, zy1), (vx, zy2), (71, 85, 105), 1)
+        cv2.line(canvas, (zx1, hy), (zx2, hy), (71, 85, 105), 1)
+
+    for i, r in enumerate(results, start=1):
+        ex, ey = r.ribbon_end
+        # 以 (0.48, 0.50) 為好球帶中心映射至九宮格
+        nx = max(-1.3, min(1.3, (ex - 0.48) / 0.14))
+        ny = max(-1.3, min(1.3, (ey - 0.50) / 0.16))
+        cx = int((zx1 + zx2) * 0.5 + nx * (zx2 - zx1) * 0.5)
+        cy = int((zy1 + zy2) * 0.5 + ny * (zy2 - zy1) * 0.5)
+        col = (60, 80, 245) if r.is_strike else (80, 195, 250)
+        cv2.circle(canvas, (cx, cy), 14, col, -1, cv2.LINE_AA)
+        cv2.circle(canvas, (cx, cy), 14, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, str(i), (cx - 5, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+
+    cv2.imwrite(str(out_png), canvas)
+
+
+def export_highlight_reel(clip_paths: List[Path], out_mp4: Path) -> bool:
+    """用 FFmpeg 將當日所有已燒好 3D 軌跡的單球短片無縫合併為一支精華 Reel（720x1280 H.264）。"""
+    valid = [p for p in clip_paths if p.exists()]
+    if len(valid) < 2:
+        return False
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        return False
+    inputs = []
+    filters = []
+    for i, p in enumerate(valid):
+        inputs.extend(["-i", str(p)])
+        filters.append(
+            f"[{i}:v]scale=720:1280:force_original_aspect_ratio=decrease,"
+            f"pad=720:1280:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p[v{i}]"
+        )
+    concat_in = "".join(f"[v{i}]" for i in range(len(valid)))
+    filter_complex = ";".join(filters) + f";{concat_in}concat=n={len(valid)}:v=1:a=0[vout]"
+    cmd = [
+        ff, "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[vout]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+        "-movflags", "+faststart",
+        str(out_mp4),
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return proc.returncode == 0 and out_mp4.exists()
 
 
 def main():
@@ -765,7 +897,7 @@ def main():
             vp, det_320, det_640, args.distance, args.angle, args.prefer_640, pose_gate=pose_gate
         )
         if not segs:
-            print(f"  -> 未偵測到完整投球軌跡 ({vp.name})", flush=True)
+            print(f"  -> 跳過：球路證據不足，無法可靠測速 ({vp.name})", flush=True)
             continue
         for p_idx, (track, flight_ms, speed_kmh) in enumerate(segs, start=1):
             m = compute_metrics(track, flight_ms, speed_kmh, w, h, args.angle)
@@ -815,10 +947,18 @@ def main():
             json.dumps([asdict(r) for r in all_results], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        chart_png = out_dir / "scout_report_card.png"
+        generate_scout_report_png(all_results, chart_png)
+        clip_paths = [out_dir / r.output_video for r in all_results]
+        reel_mp4 = out_dir / "session_highlights.mp4"
+        reel_ok = export_highlight_reel(clip_paths, reel_mp4)
         print(f"\n完成！共產出 {len(all_results)} 支 SmartScout 軌跡短片 -> {out_dir}")
         print(f"數據報表: {csv_path}")
+        print(f"球探圖卡: {chart_png}")
+        if reel_ok:
+            print(f"當日精華 Reel: {reel_mp4}")
     else:
-        print("\n本次未產出任何投球片段。")
+        print("\n本次沒有可靠的投球結果。若影片已燒入軌跡或數據卡，請使用保留出手與接球畫面的原始檔重測。")
 
 
 if __name__ == "__main__":
