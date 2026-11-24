@@ -216,7 +216,7 @@ final class PitchPhysicsEngine {
                     let flightMs = lastDet.timestampMs - firstDet.timestampMs - relPad - catPad - subCatchTrim
                     if flightMs >= 320 && flightMs <= 920 {
                         let spd = (flightDistance * 3600.0) / flightMs / 0.955
-                        if (isDepth || isOblique) && spd >= 45 && spd <= 158 {
+                        if (isDepth || isOblique) && spd >= 45 && spd <= 166 {
                             bestTrack = Array(detections[s...e])
                             bestFlightMs = (flightMs * 10).rounded() / 10
                             bestSpeed = (spd * 10).rounded() / 10

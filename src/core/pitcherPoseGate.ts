@@ -31,6 +31,15 @@ export interface PoseReleaseEvent {
   releaseMs: number;
   throwingHand: 'R' | 'L';
   score: number;
+  wristX?: number;
+  wristY?: number;
+}
+
+export interface PitcherExclusionSnapshot {
+  ts: number;
+  bodyBox?: { x0: number; y0: number; x1: number; y1: number };
+  throwingWrist?: { x: number; y: number; torso: number };
+  gloveWrist?: { x: number; y: number; torso: number };
 }
 
 interface Sample {
@@ -60,6 +69,7 @@ export class PitcherPoseGate {
   private lastPersonSeenTs = -1_000_000;
   private lastPantsBox: { x1: number; y1: number; x2: number; y2: number; torso: number; ts: number } | null = null;
   private lastHand: { wx: number; wy: number; torso: number; speed: number; ts: number } | null = null;
+  private lastExclusion: PitcherExclusionSnapshot | null = null;
   releases: PoseReleaseEvent[] = [];
 
   reset(): void {
@@ -70,6 +80,30 @@ export class PitcherPoseGate {
     this.lastPersonSeenTs = -1_000_000;
     this.lastPantsBox = null;
     this.lastHand = null;
+    this.lastExclusion = null;
+  }
+
+  /** 回傳最新一幀投手軀幹／球褲與手套排除盒（供 3 幀差分軌跡引擎使用） */
+  getLatestExclusion(ts: number): PitcherExclusionSnapshot | null {
+    if (!this.lastExclusion || Math.abs(ts - this.lastExclusion.ts) > 350) return null;
+    return this.lastExclusion;
+  }
+
+  /** 過濾在強出手峰值前 3.5 秒內的微弱拉臂假峰 */
+  getDominantReleases(): PoseReleaseEvent[] {
+    if (this.releases.length <= 1) return [...this.releases];
+    const strong = this.releases.filter((r) => r.score >= 3.5);
+    const base = strong.length > 0 ? strong : this.releases;
+    const kept = base.filter(
+      (ev) =>
+        !base.some(
+          (other) =>
+            other !== ev &&
+            Math.abs(other.releaseMs - ev.releaseMs) <= 3500 &&
+            other.score >= Math.max(10.0, ev.score * 3.2),
+        ),
+    );
+    return kept.length > 0 ? kept : base;
   }
 
   /**
@@ -204,6 +238,26 @@ export class PitcherPoseGate {
         ts,
       };
     }
+    // 更新完整軀幹／下半身與雙手腕快照（供 3 幀差分引擎排除投手肢體／手套）
+    const bodyIds = [
+      KP.L_SHOULDER, KP.R_SHOULDER, KP.L_HIP, KP.R_HIP,
+      KP.L_KNEE, KP.R_KNEE, KP.L_ANKLE, KP.R_ANKLE,
+    ].filter(ok);
+    const gIdx = useRight ? KP.L_WRIST : KP.R_WRIST;
+    this.lastExclusion = {
+      ts,
+      bodyBox:
+        bodyIds.length >= 3
+          ? {
+              x0: Math.min(...bodyIds.map((i) => kp[i][0])) - torso * 0.24,
+              y0: Math.min(...bodyIds.map((i) => kp[i][1])) - torso * 0.1,
+              x1: Math.max(...bodyIds.map((i) => kp[i][0])) + torso * 0.24,
+              y1: Math.max(...bodyIds.map((i) => kp[i][1])) + torso * 0.16,
+            }
+          : undefined,
+      throwingWrist: ok(wIdx) ? { x: kp[wIdx][0], y: kp[wIdx][1], torso } : undefined,
+      gloveWrist: ok(gIdx) ? { x: kp[gIdx][0], y: kp[gIdx][1], torso } : undefined,
+    };
     this.samples.push({ ts, personSeen: true, rSpeed, lSpeed, rAbove, lAbove, kneeLift });
     return this.trimAndDetect();
   }
@@ -245,10 +299,7 @@ export class PitcherPoseGate {
     const sc = score(c);
     if (sc < PitcherPoseGate.RELEASE_SCORE_THRESHOLD || sc < score(c - 1) || sc <= score(c + 1)) return null;
     const peakTs = this.samples[c].ts;
-    const lastRel = this.releases[this.releases.length - 1];
-    if (lastRel && peakTs - lastRel.releaseMs < PitcherPoseGate.MIN_RELEASE_GAP_MS) return null;
-
-    // 準備動作守門
+    // 準備動作守門（需在取代舊峰之前驗證，避免無準備動作假峰蓋掉真出手）
     let windup = 0;
     for (let i = 0; i < c - 1; i++) {
       const s = this.samples[i];
@@ -257,7 +308,24 @@ export class PitcherPoseGate {
     }
     if (windup < PitcherPoseGate.MIN_WINDUP_SAMPLES) return null;
 
-    const ev: PoseReleaseEvent = { releaseMs: peakTs, throwingHand: useR ? 'R' : 'L', score: sc };
+    const ev: PoseReleaseEvent = {
+      releaseMs: peakTs,
+      throwingHand: useR ? 'R' : 'L',
+      score: sc,
+      wristX: this.lastHand?.wx,
+      wristY: this.lastHand?.wy,
+    };
+
+    const lastRel = this.releases[this.releases.length - 1];
+    if (lastRel && peakTs - lastRel.releaseMs < PitcherPoseGate.MIN_RELEASE_GAP_MS) {
+      // 若 1.5 秒內出現明顯更強的真正甩臂出手峰值（例如 35.0 vs 先前舉手 2.1），直接取代舊假峰
+      if (sc > lastRel.score * 1.25) {
+        this.releases[this.releases.length - 1] = ev;
+        return ev;
+      }
+      return null;
+    }
+
     this.releases.push(ev);
     return ev;
   }

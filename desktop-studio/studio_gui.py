@@ -79,7 +79,7 @@ class SmartScoutStudioApp(tk.Tk):
         self.distance_var = tk.StringVar(value="18.44")
         self.angle_var = tk.StringVar(value="behind_pitcher")
         self.slowmo_var = tk.StringVar(value="1.0")
-        self.prefer640_var = tk.BooleanVar(value=False)
+        self.prefer640_var = tk.BooleanVar(value=True)
         self.version_var = tk.StringVar(value=f"版本：{get_git_short_rev()}")
 
         self._build_ui()
@@ -254,7 +254,7 @@ class SmartScoutStudioApp(tk.Tk):
 
         tk.Checkbutton(
             cfg_inner,
-            text="強制全程 640 高精度（陌生球場最穩，稍慢）",
+            text="優先使用 640 高精度",
             variable=self.prefer640_var,
             bg=CARD_BG,
             fg=TEXT_MAIN,

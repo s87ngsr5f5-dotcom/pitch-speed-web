@@ -86,12 +86,15 @@
    - 收集 3～5 顆已知真實球種（直球、滑球、曲球、指叉球、變速球）的 60fps 影片，微調 `classifyPitchTypeFromTrajectory` 的垂直／水平變化 cm 門檻，讓球種辨識從「參考估算」升級為「實戰準確」。
 
 ### P2｜進階功能與長期演進
-6. **跨球場 320px 網頁模型 v3（防遺忘配方）**
-   - 修正 `cv320_v2` 災難性遺忘原因：維持原框比例不硬放大、凍結骨幹前 6 層 (`freeze=6`)、以 `dataset_v3_9videos` 為主軸搭配 25% 困難負樣本與精選 640 蒸餾高信心樣本，讓網頁版 320px 也能同時通吃已知與陌生球場。
-7. **電腦工作站進階功能**
-   - 支援長牛棚影片自動切分後一鍵合併輸出「當日投球精華 Reel（含球速排行榜封面）」。
-   - 加入簡易「單幀點選補標註」工具，遇到電腦版漏抓的球點幾下就能直接加入微調資料集。
-   - 支援把 `session_report.csv` 一鍵繪製成球速趨勢圖與九宮格進壘分布 PNG 圖卡。
+6. **已實作並驗證：三平台混合「骨架出手閘門＋防晃動 3 幀差分彈道追蹤」＋ Web 1.0x 原速零掉幀分析器**
+   - **桌面端**（`desktop-studio/temporal_ball_tracker.py` + `smartscout_studio.py`）：`YOLO11n@320` → `YOLO11s@640` → `Pose-Gated TemporalBallistic` 三段混合引擎；41 支完整實測達 **6/6 雷達全中（MAE 2.93 km/h）**，未知戶外球場命中率從 `1/31`（320px 單獨）大躍進至 **`13/31`（41.9%）＋ `wba_shirakawa.mp4`**（總計 20/41）。
+   - **Web PWA**（`src/core/uploadedVideoAnalyzer.ts` + `src/core/motionBallTracker.ts` + `src/core/pitcherPoseGate.ts`）：匯入影片以 **正常 `1.0x` 原速** 流暢播完一次，同時由 120px 穩態動作偵測器鎖定非轉鏡投球區間；播完即以隱藏 `<video>` 對焦 2.8 秒投球視窗做 **36Hz 去 VFR 重複影格零掉幀 YOLO + 骨架 + 3 幀差分彈道追蹤**，自動定格回進捕手手套瞬間（絕不把軌跡畫在片尾腳架上）。
+   - **關鍵踩坑紀錄（永久禁重犯）**：
+     - Ultralytics 預設 `warmup_bias_lr=0.1` 會對已收斂的單類別偵測頭產生 1000 倍 bias 衝擊導致信心值腰斬（微調時必設 `warmup_epochs=0.0, warmup_bias_lr=lr0`）；且 590×1280 直式遠球縮至 320×320 僅剩 ~1–2px，因此線上 `public/models/ball_yolo11n.onnx` 維持無損 FP32 `OLD_PROD_V3`（5/5 雷達 0 誤報），未知球場微小遠球統一交由 440–540px 3 幀差分彈道引擎接手。
+     - `PitcherPoseGate` 線上模式必須在 1.5 秒內遇到更強甩臂峰值（`score > lastRel.score * 1.25`）時覆寫先前的拉臂小峰（Web 與 iOS `PitcherPoseGate.swift` 已同步修正）。
+   - **瀏覽器端到端實測驗證（2026-11-24）**：`rebas-r5-li-130.mp4` 測出 **`135.0 km/h · 15 幀`**（與桌面版 `134.4 km/h` 僅差 0.6 km/h）、`wba_shirakawa.mp4` 測出 **`159.1 km/h · 12 幀`** 且自動定格在捕手接球瞬間並畫出完整 3D 紅彩帶、`act_04.mp4` 測出完整 **21 幀** 3D 弧線。
+7. **電腦工作站進階功能（已實作）**
+   - 支援長牛棚影片自動切分後一鍵合併輸出當日投球精華 Reel（`session_highlights.mp4`）與 1280×720 暗黑球探報表圖卡（`scout_report_card.png`）。
 
 ---
 
@@ -104,29 +107,33 @@ pitch-speed-web/
 ├── public/
 │   ├── models/ball_yolo11n.onnx      # 線上網頁版 320px 無損 FP32 棒球模型 (9.96 MB)
 │   ├── models/pitch_action_cls.onnx  # 動作偵測模型 (1.57 MB，懶載入)
-│   ├── models/pitcher_pose_int8.onnx # 投手 17 點骨架出手閘門模型 (3.07 MB，懶載入)
-│   └── sw.js                         # PWA 雙層快取（換模型必升版號）
+│   ├── models/pitcher_pose_int8.onnx # 投手 17 點骨架出手閘門模型 (3.07 MB，獨立 Worker)
+│   └── sw.js                         # PWA 雙層快取（換模型必升 AI_CACHE，改 UI 必升 APP_CACHE）
 ├── src/
-│   ├── core/smartScoutEngine.ts      # 物理測速核心（isFinalized 結算保護）
-│   ├── core/pitcherPoseGate.ts       # Web 端 4 階段投手出手閘門狀態機
+│   ├── core/smartScoutEngine.ts      # 物理測速核心（isFinalized 結算保護＋亞幀進手套修正）
+│   ├── core/pitcherPoseGate.ts       # Web 端 4 階段投手出手閘門＋強峰覆寫＋球褲/握球屏蔽
+│   ├── core/motionBallTracker.ts     # 防晃動、骨架屏蔽、透視減速 3 幀差分彈道追蹤核心
+│   ├── core/uploadedVideoAnalyzer.ts # 1.0x 原速播完後 36Hz VFR 去重複零掉幀視窗分析器
 │   ├── data/smartScoutDefaultSessions.ts # 變化球重力拋物線分類與軌跡平滑
-│   ├── components/SmartScoutLiveCamera.tsx # 連續相機、6秒無縫換段錄影、0.25x 流暢播放
-│   └── workers/inference.worker.ts   # 純 WASM 單執行緒推論 Worker（球體＋動作＋骨架）
+│   ├── components/SmartScoutLiveCamera.tsx # 連續相機、6秒無縫換段錄影、1.0x 原速播放＋進手套定格
+│   ├── workers/inference.worker.ts   # 純 WASM 單執行緒球體推論 Worker（Top-6 NMS + 2.8x ROI 放大）
+│   └── workers/pose.worker.ts        # 獨立執行緒 17 點投手骨架 Worker（不拖慢球體偵測 FPS）
 ├── desktop-studio/                   # Windows 電腦高精度工作站（桌面捷徑指向此處）
 │   ├── studio_gui.py                 # 暗黑介面 GUI＋一鍵「檢查並更新」
 │   ├── pitcher_pose_gate.py          # 桌面端 YOLO11n-pose 17 點骨架出手閘門
-│   ├── smartscout_studio.py          # 320+640 雙模型＋出手閘門＋FFmpeg 3D 軌跡渲染引擎
+│   ├── temporal_ball_tracker.py      # 桌面端防晃動 3 幀差分彈道追蹤器（未知球場補救）
+│   ├── smartscout_studio.py          # 320+640+Temporal 三段混合引擎＋FFmpeg 3D 軌跡＋精華 Reel/球探圖卡
 │   ├── 拖曳影片批次產片.bat           # 拖曳影片/資料夾快速啟動器
 │   └── app_icon.ico                  # 桌面捷徑圖示
-├── ios-app/                          # iPhone 原生 SwiftUI + CoreML 60fps App
+├── ios-app/                          # iPhone 原生 SwiftUI + CoreML 60/120fps App
 │   ├── project.yml                   # XcodeGen 專案設定檔
 │   ├── README.md                     # Windows 免 Mac 用 Sideloadly 安裝教學
 │   └── SmartScoutPro/
-│       ├── Camera/CameraManager.swift       # 60fps 相機＋靜態抗雜訊追蹤＋直存相簿
-│       ├── Engine/CoreMLBallDetector.swift  # Apple Neural Engine 640px/320px 雙 CoreML
-│       ├── Engine/PitcherPoseGate.swift     # Apple Vision 17 點骨架出手閘門
+│       ├── Camera/CameraManager.swift       # 60/120fps 相機＋靜態抗雜訊追蹤＋背景燒錄 3D 彩帶存相簿
+│       ├── Engine/CoreMLBallDetector.swift  # Apple Neural Engine 640px/320px + 2.8x ROI 局部放大
+│       ├── Engine/PitcherPoseGate.swift     # Apple Vision 17 點骨架出手閘門（強峰覆寫＋球褲/握球屏蔽）
 │       ├── Engine/PitchPhysicsEngine.swift  # 測速、7球種變化量＋中文語音報速
-│       ├── Views/ContentView.swift          # 全螢幕 3D 彩帶 HUD＋640/320 切換鈕
+│       ├── Views/ContentView.swift          # 全螢幕 3D 彩帶 HUD＋640/320、60/120fps、距離切換
 │       └── Models/                          # ball_yolo11s_640.pt + ball_yolo11n.pt
 └── .github/workflows/
     ├── deploy.yml                   # 自動部署網頁版至 GitHub Pages

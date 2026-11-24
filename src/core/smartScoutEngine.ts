@@ -153,8 +153,8 @@ export function estimateAutomaticPitchFlight({
           const last = points[e];
           const span = Math.hypot(last.x - first.x, last.y - first.y);
           // 必須確認球已進手套完全消失結算 (isFinalized)，嚴禁球飛到一半因遠端單幀慢速就提早觸發算出假高速！
-          const hasEndStop = isFinalized && (e < segEnd || sizeRatio >= 1.45);
-          const isDepthTrack = sizeRatio >= 1.35 && span >= 0.014;
+          const hasEndStop = isFinalized && (e < segEnd || sizeRatio >= 1.30);
+          const isDepthTrack = sizeRatio >= 1.30 && span >= 0.014;
           const isObliqueTrack = sizeRatio >= 1.15 && span >= 0.14 && e < segEnd;
           const releasePadMs = s === segStart && steps[s]?.dt > 45 ? 33.37 : 0;
           const catchPadMs =
@@ -180,7 +180,7 @@ export function estimateAutomaticPitchFlight({
             flightTimeMs >= 320 &&
             flightTimeMs <= 920 &&
             speedKmh >= 45 &&
-            speedKmh <= 158 &&
+            speedKmh <= 166 &&
             ![first, last].some(({ x, y }) => x < 0.04 || x > 0.96 || y < 0.04 || y > 0.96)
           ) {
             return {
@@ -257,7 +257,7 @@ export function estimateAutomaticPitchFlight({
         fSpan >= Math.min(videoWidth, videoHeight) * 0.03 &&
         forwardRatio >= 0.68 &&
         speedKmh >= 45 &&
-        speedKmh <= 158
+        speedKmh <= 166
       ) {
         return {
           track,

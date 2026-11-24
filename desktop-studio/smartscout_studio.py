@@ -35,6 +35,12 @@ except ImportError:
     PitcherPoseGate = None  # type: ignore
     ReleaseEvent = None  # type: ignore
 
+try:
+    from temporal_ball_tracker import extract_temporal_ball_tracks, filter_dominant_releases
+except ImportError:
+    extract_temporal_ball_tracks = None  # type: ignore
+    filter_dominant_releases = None  # type: ignore
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL_320 = REPO_ROOT / "public" / "models" / "ball_yolo11n.onnx"
 DEFAULT_MODEL_640 = Path(
@@ -607,6 +613,7 @@ def scan_video(
 
     allowed_frames: Optional[set[int]] = None
     pose_states = None
+    release_events = None
     if pose_gate is not None and frames:
         pose_states, release_events = pose_gate.analyze_frames(frames, fps, stride=1)
         rejected = getattr(pose_gate, "rejected_no_windup", [])
@@ -615,7 +622,11 @@ def scan_video(
         if not release_events:
             print("  [投手動作閘門] 未偵測到明確出手，改用全片段搜尋（含軌跡物理過濾）", flush=True)
         if release_events:
-            strong = [e for e in release_events if e.peak_score >= 3.5] or release_events
+            strong = (
+                filter_dominant_releases(release_events, fps)
+                if filter_dominant_releases is not None
+                else ([e for e in release_events if e.peak_score >= 3.5] or release_events)
+            )
             allowed_frames = set()
             for ev in strong:
                 start = ev.window_start_frame
@@ -734,6 +745,26 @@ def scan_video(
         segs = estimate_pitch_segments(dets, w, h, distance_m=distance_m)
         if segs:
             return segs, fps, w, h, label
+
+    # Fallback 3: Pose-Gated 3-Frame Temporal-Difference Ballistic Tracker
+    # Recovers tiny 3-10px flying baseballs in unseen outdoor stadiums & portrait phone videos.
+    if extract_temporal_ball_tracks is not None and frames:
+        t_tracks = extract_temporal_ball_tracks(
+            frames, fps, pose_states=pose_states, release_events=release_events, allowed_frames=allowed_frames
+        )
+        t_segs: List[Tuple[List[Detection], float, float]] = []
+        for tr in t_tracks:
+            t_dets = [
+                Detection(
+                    frame_idx=d.frame_idx,
+                    timestamp_ms=d.timestamp_ms,
+                    x=d.x, y=d.y, width=d.width, height=d.height, confidence=d.confidence,
+                )
+                for d in tr
+            ]
+            t_segs.extend(estimate_pitch_segments(t_dets, w, h, distance_m=distance_m))
+        if t_segs:
+            return t_segs, fps, w, h, "TemporalBallistic"
 
     return [], fps, w, h, "none"
 

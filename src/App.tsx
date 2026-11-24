@@ -77,6 +77,7 @@ export function App() {
   const poseBusyRef = useRef<boolean>(false);
   const isBusyRef = useRef<boolean>(false);
   const pendingScanResolveRef = useRef<((det: BallDetection | null) => void) | null>(null);
+  const pendingPoseScanResolveRef = useRef<((kp: Array<[number, number, number]> | null) => void) | null>(null);
   // 投手骨架出手閘門（獨立 Worker 非阻塞執行，絕不拖慢球體偵測）
   const poseGateRef = useRef(new PitcherPoseGate());
   const lastPoseRequestTsRef = useRef(-1_000_000);
@@ -226,7 +227,11 @@ export function App() {
         poseReadyRef.current = true;
       } else if (m.type === 'POSE_RESULT') {
         poseBusyRef.current = false;
-        if (typeof m.timestampMs === 'number') {
+        if (pendingPoseScanResolveRef.current) {
+          const resolve = pendingPoseScanResolveRef.current;
+          pendingPoseScanResolveRef.current = null;
+          resolve(m.pose ?? null);
+        } else if (typeof m.timestampMs === 'number') {
           if (m.timestampMs < lastPoseIngestTsRef.current - 100) poseGateRef.current.reset();
           lastPoseIngestTsRef.current = m.timestampMs;
           poseGateRef.current.ingest(m.pose ?? null, m.timestampMs);
@@ -342,6 +347,35 @@ export function App() {
       }
     },
     [shouldRequestPose]
+  );
+
+  // 離線視窗零掉幀骨架掃描專用（約 25ms/幀，精準鎖定出手與排除球褲／肢體）
+  const handleScanPoseFrame = useCallback(
+    (
+      bitmap: ImageBitmap,
+      timestampMs: number,
+      origWidth: number,
+      origHeight: number
+    ): Promise<Array<[number, number, number]> | null> => {
+      const pw = poseWorkerRef.current;
+      if (!pw || !poseReadyRef.current) {
+        bitmap.close();
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve) => {
+        pendingPoseScanResolveRef.current = resolve;
+        poseBusyRef.current = true;
+        try {
+          pw.postMessage({ type: 'POSE', bitmap, timestampMs, origWidth, origHeight }, [bitmap]);
+        } catch {
+          bitmap.close();
+          poseBusyRef.current = false;
+          pendingPoseScanResolveRef.current = null;
+          resolve(null);
+        }
+      });
+    },
+    []
   );
 
   const handleNewMeasuredPitch = useCallback(
@@ -501,6 +535,7 @@ export function App() {
             onFrame={handleFrame}
             onPoseFrame={handlePoseFrame}
             onScanFrame={handleScanFrame}
+            onScanPoseFrame={handleScanPoseFrame}
             onNewMeasuredPitch={handleNewMeasuredPitch}
             onChangePitchType={(pitchId, newType) => {
               if (activeUserSession) {

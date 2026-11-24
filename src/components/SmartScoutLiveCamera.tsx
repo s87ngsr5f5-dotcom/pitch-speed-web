@@ -14,6 +14,10 @@ import {
 } from '../core/smartScoutEngine';
 import { BallDetection, PitchActionPhase, Point2D, TunnelBoxConfig } from '../types';
 import { PitcherPoseGate } from '../core/pitcherPoseGate';
+import {
+  SteadyActivityProfiler,
+  analyzeUploadedPitchWindows,
+} from '../core/uploadedVideoAnalyzer';
 import { savePitchVideoClip } from '../utils/pitchVideoStore';
 import { VideoFlightReview } from './VideoFlightReview';
 
@@ -108,6 +112,12 @@ interface SmartScoutLiveCameraProps {
     width: number,
     height: number
   ) => Promise<BallDetection | null>;
+  onScanPoseFrame?: (
+    bitmap: ImageBitmap,
+    timestampMs: number,
+    width: number,
+    height: number
+  ) => Promise<Array<[number, number, number]> | null>;
   onNewMeasuredPitch: (
     pitch: Omit<SmartScoutPitchRecord, 'id' | 'pitchNumber' | 'timestamp'>
   ) => void;
@@ -132,6 +142,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   onFrame,
   onPoseFrame,
   onScanFrame,
+  onScanPoseFrame,
   onNewMeasuredPitch,
   onChangePitchType,
 }) => {
@@ -182,6 +193,13 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
   // 滾動 90 幀靜態背景抑制器（14px 格點）：同一位置反覆亮 >= 5 次一律判為球場燈光／招牌，絕不當成棒球
   const staticBinWindowRef = useRef<number[]>([]);
   const staticBinCountsRef = useRef<Map<number, number>>(new Map());
+  // 極輕量 120px 穩態動作偵測器 + YOLO 種子時間（供 1.0x 原速播完後 1–2 秒精準零掉幀鎖定球路）
+  const activityProfilerRef = useRef(new SteadyActivityProfiler());
+  const yoloSeedTimesRef = useRef<number[]>([]);
+  const smartScanTokenRef = useRef<number>(0);
+  const timestampOffsetRef = useRef<number | null>(null);
+  const suppressSeekResetRef = useRef<boolean>(false);
+  const lastMeasuredCatchSecRef = useRef<number | null>(null);
   const [cameraCheckpoints, setCameraCheckpoints] = useState(() => ({
     behind_pitcher: readCheckpoints('behind_pitcher'),
     behind_catcher: readCheckpoints('behind_catcher'),
@@ -461,15 +479,39 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     const sentTimestamps = sentTimestampsRef.current;
     const fallbackCanvas = document.createElement('canvas');
     const resetSource = () => {
+      if (suppressSeekResetRef.current) {
+        suppressSeekResetRef.current = false;
+        return;
+      }
+      smartScanTokenRef.current += 1;
       timestampOffset = null;
+      timestampOffsetRef.current = null;
       lastMediaTime = -1;
       sentTimestamps.clear();
       staticBinWindowRef.current = [];
       staticBinCountsRef.current.clear();
+      activityProfilerRef.current.reset();
+      yoloSeedTimesRef.current = [];
+      lastMeasuredCatchSecRef.current = null;
+      poseGate?.reset();
       resetTrack();
     };
     resetSource();
     video.addEventListener('seeking', resetSource);
+
+    // 極輕量 120px 穩態動作取樣（每幀 < 0.15ms，完全不拖慢 1.0x 原速流暢播放）
+    const sampleActivity = (mediaTimeSec: number) => {
+      if (
+        !uploadedVideoUrl ||
+        autoReturnToCameraRef.current ||
+        choosingRegion || reviewingFlight || calibrating ||
+        discipline !== 'pitching' ||
+        video.readyState < 2 || video.paused || video.ended || video.seeking
+      ) {
+        return;
+      }
+      activityProfilerRef.current.sample(video, mediaTimeSec);
+    };
 
     const captureBitmap = async () => {
       if (region) {
@@ -517,6 +559,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       const h = video.videoHeight;
       const mediaTimeMs = mediaTime * 1000;
       timestampOffset ??= lastSentTimestampMs + 1 - mediaTimeMs;
+      timestampOffsetRef.current = timestampOffset;
       const offset = timestampOffset;
       const timestampMs = mediaTimeMs + offset;
       lastSentTimestampMs = timestampMs;
@@ -553,8 +596,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
           bitmap.close();
           throw error;
         }
-        // 非阻塞送入獨立骨架 Worker（僅全畫面模式，完全不影響球體偵測 FPS）
-        if (onPoseFrame && !region) {
+        // 獨立骨架 Worker（即時鏡頭模式啟用；匯入影片在 1.0x 播完後的精準視窗掃描再零掉幀執行，避免搶 CPU）
+        if (onPoseFrame && !region && !uploadedVideoUrl) {
           void createImageBitmap(video)
             .then((poseBmp) => {
               if (stopped || offset !== timestampOffset) {
@@ -576,6 +619,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         if (stopped) return;
         if (meta.mediaTime !== lastMediaTime) {
           lastMediaTime = meta.mediaTime;
+          sampleActivity(meta.mediaTime);
           sendFrame(meta.mediaTime);
         }
         rvfcId = video.requestVideoFrameCallback!(onVideoFrame);
@@ -586,6 +630,7 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         if (stopped) return;
         if (video.currentTime !== lastMediaTime) {
           lastMediaTime = video.currentTime;
+          sampleActivity(lastMediaTime);
           sendFrame(lastMediaTime);
         }
         rafId = requestAnimationFrame(onRaf);
@@ -971,7 +1016,12 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     } else {
       activeTrack.push(chosenBall);
     }
-    if (uploadedVideoUrl) detectedInFileRef.current += 1;
+    if (uploadedVideoUrl) {
+      detectedInFileRef.current += 1;
+      const offset = timestampOffsetRef.current ?? 0;
+      const seedSec = Math.max(0, (chosenBall.timestampMs - offset) / 1000);
+      if (Number.isFinite(seedSec)) yoloSeedTimesRef.current.push(seedSec);
+    }
     // 至少確認 2 幀連續飛行才畫出軌跡線，避免單幀零星點亂閃
     if (activeTrack.length >= 2) {
       setLiveTrackDots([...activeTrack]);
@@ -1007,7 +1057,12 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
     });
 
     if (record) {
-      if (uploadedVideoUrl) measuredInFileRef.current += 1;
+      if (uploadedVideoUrl) {
+        measuredInFileRef.current += 1;
+        const offset = timestampOffsetRef.current ?? 0;
+        const lastTs = activeTrack[activeTrack.length - 1]?.timestampMs;
+        if (lastTs !== undefined) lastMeasuredCatchSecRef.current = Math.max(0, (lastTs - offset) / 1000);
+      }
       const snap = captureVideoSnapshot();
       setDismissedPitchId(null);
       setCaptureMessage('');
@@ -1044,7 +1099,12 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
             isFinalized: true,
           });
         if (autoRec) {
-          if (uploadedVideoUrl) measuredInFileRef.current += 1;
+          if (uploadedVideoUrl) {
+            measuredInFileRef.current += 1;
+            const offset = timestampOffsetRef.current ?? 0;
+            const lastTs = buffered[buffered.length - 1]?.timestampMs;
+            if (lastTs !== undefined) lastMeasuredCatchSecRef.current = Math.max(0, (lastTs - offset) / 1000);
+          }
           const snap = captureVideoSnapshot();
           setDismissedPitchId(null);
           setCaptureMessage('');
@@ -1142,6 +1202,10 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       video.srcObject.getTracks().forEach((track) => track.stop());
       video.srcObject = null;
     }
+    smartScanTokenRef.current += 1;
+    activityProfilerRef.current.reset();
+    yoloSeedTimesRef.current = [];
+    lastMeasuredCatchSecRef.current = null;
     setCaptureMessage('');
     setHasLiveCamera(false);
     setFileEnded(false);
@@ -1170,7 +1234,12 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       return;
     }
     if (video.readyState >= 1) video.currentTime = 0;
-    video.playbackRate = uploadedVideoUrl ? 0.25 : 1;
+    smartScanTokenRef.current += 1;
+    activityProfilerRef.current.reset();
+    yoloSeedTimesRef.current = [];
+    lastMeasuredCatchSecRef.current = null;
+    poseGate?.reset();
+    video.playbackRate = 1.0;
     void video.play().catch(() => setCaptureMessage(
       '無法播放這部影片。請試用 H.264 編碼的 MP4。'
     ));
@@ -1337,9 +1406,123 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
         autoPlay={!uploadedVideoUrl}
         onPlaying={() => setFilePlaying(true)}
         onPause={() => setFilePlaying(false)}
-        onEnded={() => {
+        onEnded={(event) => {
+          const video = event.currentTarget;
           setFilePlaying(false);
           setFileEnded(true);
+
+          // 0) 若片尾最後一球仍在 YOLO 緩衝中（短片結尾未滿 260ms），先同步結算 YOLO 軌跡
+          if (measuredInFileRef.current === 0 && activeTrackRef.current.length >= 4 && video.videoWidth > 0 && video.videoHeight > 0) {
+            if (flushTimerRef.current !== null) {
+              window.clearTimeout(flushTimerRef.current);
+              flushTimerRef.current = null;
+            }
+            const rawBuf = [...activeTrackRef.current];
+            const filteredBuf = poseGate ? poseGate.filter(rawBuf) : rawBuf;
+            const endRec = computeRealPitchFromDetections({
+              detections: filteredBuf,
+              videoWidth: video.videoWidth,
+              videoHeight: video.videoHeight,
+              cameraAngle,
+              discipline,
+              distanceMeters,
+              checkpoints: manualCheckpoints,
+              preferredPitchType: selectedPitchType,
+              videoUrl: uploadedVideoUrl ?? undefined,
+              isFinalized: true,
+            });
+            if (endRec) {
+              measuredInFileRef.current += 1;
+              const offset = timestampOffsetRef.current ?? 0;
+              const lastTs = filteredBuf[filteredBuf.length - 1]?.timestampMs;
+              if (lastTs !== undefined) lastMeasuredCatchSecRef.current = Math.max(0, (lastTs - offset) / 1000);
+              setDismissedPitchId(null);
+              setCaptureMessage('');
+              resetTrack();
+              setProgress(0.06);
+              setIsAnimatingRibbon(true);
+              onNewMeasuredPitch({ ...endRec, snapshotUrl: captureVideoSnapshot() });
+              return;
+            }
+          }
+
+          // 1) 若 1.0x 原速播放中 YOLO 掉幀或未知戶外球場漏抓，立即對精準動作視窗（~1.8 秒）執行零掉幀 YOLO + Pose 彈道補救
+          if (measuredInFileRef.current === 0 && uploadedVideoUrl && video.duration > 0) {
+            const windows = activityProfilerRef.current.pickCandidateWindows(
+              video.duration,
+              yoloSeedTimesRef.current,
+            );
+            if (windows.length > 0) {
+              const myToken = ++smartScanTokenRef.current;
+              setCaptureMessage('AI 精準鎖定球路中…');
+              void analyzeUploadedPitchWindows({
+                videoUrl: uploadedVideoUrl,
+                durationSec: video.duration,
+                windows,
+                cameraAngle,
+                discipline,
+                distanceMeters,
+                checkpoints: manualCheckpoints,
+                preferredPitchType: selectedPitchType,
+                region,
+                onScanFrame,
+                onScanPoseFrame,
+                isCancelled: () => smartScanTokenRef.current !== myToken,
+                onProgress: (msg) => {
+                  if (smartScanTokenRef.current === myToken) setCaptureMessage(msg);
+                },
+              }).then((result) => {
+                if (smartScanTokenRef.current !== myToken) return;
+                if (result) {
+                  measuredInFileRef.current += 1;
+                  const catchSec = Math.max(0, Math.min(video.duration || Infinity, result.catchSec));
+                  lastMeasuredCatchSecRef.current = catchSec;
+                  setDismissedPitchId(null);
+                  setCaptureMessage('');
+                  resetTrack();
+                  setProgress(0.06);
+                  setIsAnimatingRibbon(true);
+
+                  // 將畫面定格在球進捕手手套的真實瞬間（避免片尾轉鏡拍到腳架或走離投手丘）
+                  const commitWithSnapshot = () => {
+                    if (smartScanTokenRef.current !== myToken) return;
+                    onNewMeasuredPitch({
+                      ...result.record,
+                      snapshotUrl: captureVideoSnapshot(),
+                    });
+                  };
+                  if (Number.isFinite(catchSec) && Math.abs(video.currentTime - catchSec) > 0.08) {
+                    suppressSeekResetRef.current = true;
+                    video.addEventListener('seeked', commitWithSnapshot, { once: true });
+                    video.currentTime = catchSec;
+                  } else {
+                    commitWithSnapshot();
+                  }
+                  return;
+                }
+                const area = region ? '所選範圍內' : '全畫面';
+                const detected = detectedInFileRef.current;
+                setCaptureMessage(
+                  detected
+                    ? `${area}在 ${detected} 幀找到疑似球的位置，但無法確認完整球路。可按「手動標記出手與接球時間」計算。`
+                    : `${area}沒有偵測到球。可按「手動標記出手與接球時間」計算。`,
+                );
+              });
+              return;
+            }
+          }
+
+          // 2) 若 YOLO 已測到球但影片片尾轉鏡或人物離開，自動定格回進手套那幀顯示 3D 軌跡
+          if (
+            measuredInFileRef.current > 0 &&
+            lastMeasuredCatchSecRef.current !== null &&
+            Number.isFinite(lastMeasuredCatchSecRef.current) &&
+            Math.abs(video.currentTime - lastMeasuredCatchSecRef.current) > 0.45
+          ) {
+            suppressSeekResetRef.current = true;
+            video.currentTime = Math.min(video.duration || Infinity, lastMeasuredCatchSecRef.current);
+          }
+
           if (measuredInFileRef.current === 0) {
             const area = region ? '所選範圍內' : '全畫面';
             const detected = detectedInFileRef.current;

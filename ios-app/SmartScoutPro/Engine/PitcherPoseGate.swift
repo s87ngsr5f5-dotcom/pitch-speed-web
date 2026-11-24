@@ -303,8 +303,6 @@ final class PitcherPoseGate {
         let sc = score(c)
         guard sc >= Self.releaseScoreThreshold, sc >= score(c - 1), sc > score(c + 1) else { return }
         let peakTs = samples[c].ts
-        if let lastRel = releases.last, peakTs - lastRel.releaseMs < Self.minReleaseGapMs { return }
-
         // 準備動作守門：出手前必須看到抬腿或手臂移動
         var windup = 0
         for i in 0..<max(0, c - 1) {
@@ -314,6 +312,14 @@ final class PitcherPoseGate {
         }
         guard windup >= Self.minWindupSamples else { return }
 
-        releases.append(PoseReleaseEvent(releaseMs: peakTs, throwingHand: useR ? "R" : "L", score: sc))
+        let ev = PoseReleaseEvent(releaseMs: peakTs, throwingHand: useR ? "R" : "L", score: sc)
+        if let lastRel = releases.last, peakTs - lastRel.releaseMs < Self.minReleaseGapMs {
+            // 若 1.5 秒內出現明顯更強的真正甩臂出手峰值，立即取代先前的拉臂小峰
+            if sc > lastRel.score * 1.25 {
+                releases[releases.count - 1] = ev
+            }
+            return
+        }
+        releases.append(ev)
     }
 }
