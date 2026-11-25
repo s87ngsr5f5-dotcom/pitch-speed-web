@@ -206,7 +206,12 @@ final class PitchPhysicsEngine {
                     let minLate = lateSzs.min() ?? max(lastDet.width, lastDet.height)
                     let sizeRatio = max(maxEarly / max(1, minLate), maxLate / max(1, minEarly))
                     let span = hypot(Double(points[e].x - points[s].x), Double(points[e].y - points[s].y))
-                    let isDepth = sizeRatio >= 1.32 && span >= 0.014
+                    var arcSpan = span
+                    for k in s...e {
+                        let d = hypot(Double(points[k].x - points[s].x), Double(points[k].y - points[s].y))
+                        if d > arcSpan { arcSpan = d }
+                    }
+                    let isDepth = sizeRatio >= 1.32 && arcSpan >= 0.014
                     let isOblique = sizeRatio >= 1.12 && span >= 0.12
                     let relPad = (s == segStart && steps[s].dt > 45) ? 33.37 : 0.0
                     let catPad = (e == segEnd && steps[e - 1].dt > 45 && sizeRatio >= 1.50) ? 33.37 : 0.0

@@ -560,8 +560,69 @@ def extract_temporal_ball_tracks(
             continue
         used_windows.append((t0, t1))
 
-        # Probe +1 frame after last blob for tiny catcher-mitt impact (1-3px final arrival frame)
+        # Probe -1..-2 frames BEFORE first blob to recover motion-blurred fingertip release right at the pitcher's hand
         ext_tr = list(tr)
+        for _ in range(2):
+            if len(ext_tr) < 6:
+                break
+            f_first, ts_first, b_first = ext_tr[0]
+            f_second, _, b_second = ext_tr[1]
+            f_prev = f_first - 1
+            if (f_prev - stride) not in grays or f_prev not in grays or (f_prev + stride) not in grays:
+                break
+            df_first = max(1, f_second - f_first)
+            vx0 = (b_second.x - b_first.x) / df_first
+            vy0 = (b_second.y - b_first.y) / df_first
+            spd0 = math.hypot(vx0, vy0)
+            pred_px = b_first.x - vx0 * 1.15
+            pred_py = b_first.y - vy0 * 1.15
+            search_r = int(round(max(14.0, min(36.0, spd0 * 0.75 + 10.0))))
+            px0 = max(0, int(round(pred_px - search_r)))
+            px1 = min(proc_w, int(round(pred_px + search_r + 1)))
+            py0 = max(0, int(round(pred_py - search_r)))
+            py1 = min(proc_h, int(round(pred_py + search_r + 1)))
+            if px1 <= px0 + 2 or py1 <= py0 + 2:
+                break
+            sc_patch = grays[f_prev][py0:py1, px0:px1]
+            sp_patch = grays[f_prev - stride][py0:py1, px0:px1]
+            sn_patch = grays[f_prev + stride][py0:py1, px0:px1]
+            if b_first.polarity == 1:
+                m_patch = (sc_patch >= 90) & ((sc_patch - sp_patch) >= 12) & ((sc_patch - sn_patch) >= 12)
+            else:
+                m_patch = (sp_patch >= 165) & (sn_patch >= 165) & ((sc_patch - sp_patch) <= -14) & ((sc_patch - sn_patch) <= -14)
+            ys_p, xs_p = np.where(m_patch)
+            if 3 <= len(xs_p) <= 650:
+                nx = float(np.mean(xs_p)) + px0
+                ny = float(np.mean(ys_p)) + py0
+                nbw = float(np.ptp(xs_p) + 1)
+                nbh = float(np.ptp(ys_p) + 1)
+                dot_back = (b_first.x - nx) * vx0 + (b_first.y - ny) * vy0
+                step_back = math.hypot(b_first.x - nx, b_first.y - ny)
+                ts_prev = round(f_prev * 1000.0 / fps, 2)
+                new_span_ms = ext_tr[-1][1] - ts_prev
+                size_plausible = max(nbw, nbh) >= max(b_first.w, b_first.h) * 0.70
+                if (
+                    dot_back > 0
+                    and step_back >= max(1.5, spd0 * 0.45)
+                    and step_back <= max(42.0, spd0 * 2.2)
+                    and math.hypot(nx - pred_px, ny - pred_py) <= search_r * 0.85
+                    and size_plausible
+                    and new_span_ms <= 900.0
+                ):
+                    ext_tr.insert(
+                        0,
+                        (
+                            f_prev,
+                            ts_prev,
+                            TemporalBlob(nx, ny, nbw, nbh, float(len(xs_p)), float(np.mean(sc_patch[ys_p, xs_p])), b_first.polarity),
+                        ),
+                    )
+                else:
+                    break
+            else:
+                break
+
+        # Probe +1 frame after last blob for tiny catcher-mitt impact (1-3px final arrival frame)
         if len(ext_tr) >= 6:
             f_last, ts_last, b_last = ext_tr[-1]
             f_prev, _, b_prev = ext_tr[-2]

@@ -611,8 +611,80 @@ export function extractFlyingBallTrackFromFrames(
 
   if (bestTrack.length < 6) return [];
 
-  // Probe +1 frame after last blob for tiny catcher-mitt impact pixel
+  // Probe -1..-2 frames BEFORE first blob to recover motion-blurred fingertip release right at the pitcher's hand
   const extTrack = [...bestTrack];
+  for (let backStep = 0; backStep < 2; backStep++) {
+    const firstNode = extTrack[0];
+    const secondNode = extTrack[1];
+    const fPrev = firstNode.frameIdx - 1;
+    if (fPrev - stride < 0 || fPrev + stride >= frames.length) break;
+    const dfFirst = Math.max(1, secondNode.frameIdx - firstNode.frameIdx);
+    const vx0 = (secondNode.blob.x - firstNode.blob.x) / dfFirst;
+    const vy0 = (secondNode.blob.y - firstNode.blob.y) / dfFirst;
+    const spd0 = Math.hypot(vx0, vy0);
+    // Perspective 1/Z^2 means the ball 1 frame closer to the pitcher moved ~1.15x further
+    const predPx = firstNode.blob.x - vx0 * 1.15;
+    const predPy = firstNode.blob.y - vy0 * 1.15;
+    const searchR = Math.round(Math.max(14, Math.min(36, spd0 * 0.75 + 10)));
+    const px0 = Math.max(0, Math.round(predPx - searchR));
+    const px1 = Math.min(procWidth - 1, Math.round(predPx + searchR));
+    const py0 = Math.max(0, Math.round(predPy - searchR));
+    const py1 = Math.min(procHeight - 1, Math.round(predPy + searchR));
+    const gCurr = frames[fPrev].gray;
+    const gPrev = frames[fPrev - stride].gray;
+    const gNext = frames[fPrev + stride].gray;
+    let cnt = 0, sx = 0, sy = 0, bx0 = px1, bx1 = px0, by0 = py1, by1 = py0;
+    for (let y = py0; y <= py1; y++) {
+      const row = y * procWidth;
+      for (let x = px0; x <= px1; x++) {
+        const idx = row + x;
+        const c = gCurr[idx], p = gPrev[idx], n = gNext[idx];
+        const hit =
+          firstNode.blob.polarity === 1
+            ? c >= 90 && c - p >= 12 && c - n >= 12
+            : p >= 165 && n >= 165 && c - p <= -14 && c - n <= -14;
+        if (hit) {
+          cnt++;
+          sx += x;
+          sy += y;
+          if (x < bx0) bx0 = x;
+          if (x > bx1) bx1 = x;
+          if (y < by0) by0 = y;
+          if (y > by1) by1 = y;
+        }
+      }
+    }
+    if (cnt >= 3 && cnt <= 650) {
+      const nx = sx / cnt;
+      const ny = sy / cnt;
+      const nbw = bx1 - bx0 + 1;
+      const nbh = by1 - by0 + 1;
+      const dotBack = (firstNode.blob.x - nx) * vx0 + (firstNode.blob.y - ny) * vy0;
+      const stepBack = Math.hypot(firstNode.blob.x - nx, firstNode.blob.y - ny);
+      const newSpanMs = extTrack[extTrack.length - 1].timestampMs - frames[fPrev].timestampMs;
+      const sizePlausible = Math.max(nbw, nbh) >= Math.max(firstNode.blob.w, firstNode.blob.h) * 0.7;
+      if (
+        dotBack > 0 &&
+        stepBack >= Math.max(1.5, spd0 * 0.45) &&
+        stepBack <= Math.max(42, spd0 * 2.2) &&
+        Math.hypot(nx - predPx, ny - predPy) <= searchR * 0.85 &&
+        sizePlausible &&
+        newSpanMs <= 900
+      ) {
+        extTrack.unshift({
+          frameIdx: fPrev,
+          timestampMs: frames[fPrev].timestampMs,
+          blob: { x: nx, y: ny, w: nbw, h: nbh, area: cnt, brightness: 200, polarity: firstNode.blob.polarity },
+        });
+      } else {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+
+  // Probe +1 frame after last blob for tiny catcher-mitt impact pixel
   const lastNode = extTrack[extTrack.length - 1];
   const prevNode = extTrack[extTrack.length - 2];
   const fNext = lastNode.frameIdx + 1;

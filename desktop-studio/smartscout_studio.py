@@ -242,8 +242,10 @@ def estimate_pitch_segments(
                 late_szs = [max(dets[k].width, dets[k].height) for k in range(max(s, e - 2), e + 1)]
                 size_ratio = max(max(early_szs) / max(1.0, min(late_szs)), max(late_szs) / max(1.0, min(early_szs)))
                 span = math.hypot(pts[e][0] - pts[s][0], pts[e][1] - pts[s][1])
+                arc_span = max(math.hypot(pts[k][0] - pts[s][0], pts[k][1] - pts[s][1]) for k in range(s, e + 1))
+                eff_span = max(span, arc_span)
                 has_end_stop = e < seg_end or size_ratio >= 1.30 or (span >= 0.14 and (e - s) >= 7)
-                is_depth = size_ratio >= 1.30 and span >= 0.014
+                is_depth = size_ratio >= 1.30 and eff_span >= 0.014
                 is_oblique = span >= 0.14 and (size_ratio >= 1.12 or (e - s) >= 7)
                 rel_pad = 33.37 if (s == seg_start and steps[s][2] > 45) else 0.0
                 cat_pad = 33.37 if (e == seg_end and steps[e - 1][2] > 45 and size_ratio >= 1.50) else 0.0

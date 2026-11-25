@@ -308,10 +308,19 @@ export async function analyzeUploadedPitchWindows(
     const stepSec = 1 / 30;
     const workCanvas = document.createElement('canvas');
 
-    // Deterministic 0.5s-spaced 1-frame-pair steady-activity probe for long clips (> 4.2s):
-    // 100% immune to slow-phone / high-CPU frame drops during 1.0x playback!
-    let windows = initialWindows;
-    if (durationSec > 4.2) {
+    // Deterministic window selection (100% immune to 1.0x CPU jitter so identical videos ALWAYS produce identical speed!):
+    // - Short clips (<= 4.5s): always scan the exact fixed full clip [0, dur - 0.04].
+    // - Long clips (> 4.5s): deterministic 0.5s coarse steady-activity probe with 0.1s-quantized window bounds.
+    const quantizeWin = (w: ScanWindow): ScanWindow => {
+      const s = Math.max(0, Math.floor(w.startSec * 10) / 10);
+      const e = Math.min(Math.max(s + 0.4, durationSec - 0.04), Math.ceil(w.endSec * 10) / 10);
+      return { startSec: s, endSec: e, preferYolo: w.preferYolo };
+    };
+    let windows: ScanWindow[];
+    if (durationSec <= 4.5) {
+      windows = [{ startSec: 0, endSec: Math.max(0.4, durationSec - 0.04), preferYolo: true }];
+    } else {
+      windows = initialWindows.map(quantizeWin);
       const pScale = Math.min(1, 120 / Math.max(1, Math.min(origW, origH)));
       const cpw = Math.max(48, Math.round(origW * pScale));
       const cph = Math.max(48, Math.round(origH * pScale));
@@ -358,7 +367,11 @@ export async function analyzeUploadedPitchWindows(
             // ignore transient frame error
           }
         }
-        const detWins = pickPitchScanWindows(durationSec, probed, yoloSeedTimesSec);
+        // Pass [] (not jittery 1.0x yoloSeedTimesSec) so long-clip windows are 100% deterministic across runs
+        const detWins = pickPitchScanWindows(durationSec, probed, []).map((w) => ({
+          ...quantizeWin(w),
+          preferYolo: w.preferYolo || yoloSeedTimesSec.some((s) => s >= w.startSec - 0.3 && s <= w.endSec + 0.3),
+        }));
         if (detWins.length > 0) windows = detWins;
       }
     }
@@ -528,6 +541,22 @@ export async function analyzeUploadedPitchWindows(
           motionFrames.push({ timestampMs: tsMs, gray, exclusion: excl });
         } catch {
           // ignore frame
+        }
+      }
+
+      // Normalize deduplicated frame timestamps to uniform true video cadence (eliminates 1/36s seek-phase jitter!)
+      if (motionFrames.length >= 6) {
+        const t0 = motionFrames[0].timestampMs;
+        const t1 = motionFrames[motionFrames.length - 1].timestampMs;
+        const rawDt = (t1 - t0) / (motionFrames.length - 1);
+        const normDt =
+          Math.abs(rawDt - 33.367) <= 4.0
+            ? 33.367
+            : Math.abs(rawDt - 16.683) <= 2.2
+            ? 16.683
+            : rawDt;
+        for (let k = 0; k < motionFrames.length; k++) {
+          motionFrames[k].timestampMs = Number((t0 + k * normDt).toFixed(2));
         }
       }
 

@@ -1043,6 +1043,8 @@ export const SmartScoutLiveCamera: React.FC<SmartScoutLiveCameraProps> = ({
       }
       return;
     }
+    // 上傳影片統一交由播完後的零掉幀決定性分析結算，避免 1.0x 即時播放因 CPU 掉幀導致每次測速漂移
+    if (uploadedVideoUrl) return;
     const record = computeRealPitchFromDetections({
       detections: poseGate ? poseGate.filter(activeTrack) : activeTrack,
       videoWidth: video.videoWidth,

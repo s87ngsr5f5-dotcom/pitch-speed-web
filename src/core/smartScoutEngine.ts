@@ -157,9 +157,14 @@ export function estimateAutomaticPitchFlight({
           const first = points[s];
           const last = points[e];
           const span = Math.hypot(last.x - first.x, last.y - first.y);
+          let arcSpan = span;
+          for (let k = s; k <= e; k++) {
+            const d = Math.hypot(points[k].x - first.x, points[k].y - first.y);
+            if (d > arcSpan) arcSpan = d;
+          }
           // 必須確認球已進手套完全消失結算 (isFinalized)，嚴禁球飛到一半因遠端單幀慢速就提早觸發算出假高速！
           const hasEndStop = isFinalized && (e < segEnd || sizeRatio >= 1.30);
-          const isDepthTrack = sizeRatio >= 1.30 && span >= 0.014;
+          const isDepthTrack = sizeRatio >= 1.30 && arcSpan >= 0.014;
           const isObliqueTrack = sizeRatio >= 1.15 && span >= 0.14 && e < segEnd;
           const releasePadMs = s === segStart && steps[s]?.dt > 45 ? 33.37 : 0;
           const catchPadMs =
