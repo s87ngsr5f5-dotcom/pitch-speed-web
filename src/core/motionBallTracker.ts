@@ -261,6 +261,7 @@ export function extractFlyingBallTrackFromFrames(
       : null;
 
     const blobs: CandidateBlob[] = [];
+    const blobsA2: CandidateBlob[] = [];
     const extractFromMask = (mask: Uint8Array, polarity: 1 | -1) => {
       visited.fill(0);
       for (let y = minY; y < maxY; y++) {
@@ -342,7 +343,9 @@ export function extractFlyingBallTrackFromFrames(
             continue;
           }
 
-          blobs.push({ x: cx, y: cy, w: bw, h: bh, area, brightness: sumB / area, polarity });
+          const tb: CandidateBlob = { x: cx, y: cy, w: bw, h: bh, area, brightness: sumB / area, polarity };
+          if (area === 2) blobsA2.push(tb);
+          else blobs.push(tb);
         }
       }
     };
@@ -350,8 +353,20 @@ export function extractFlyingBallTrackFromFrames(
     if (hasBright) extractFromMask(brightMask, 1);
     if (hasDark) extractFromMask(darkMask, -1);
 
-    if (blobs.length > 0 && blobs.length <= 55) {
-      candsByIdx.push({ frameIdx: i, timestampMs: ts, blobs });
+    // Only include up to 12 brightest 2px distant-ball blobs in clean/low-clutter frames (<=25 larger blobs)
+    if (blobs.length <= 85) {
+      if (blobs.length <= 25 && blobsA2.length > 0) {
+        const rem = Math.min(12, 45 - blobs.length);
+        if (rem > 0) {
+          if (blobsA2.length > rem) {
+            blobsA2.sort((a, b) => b.brightness - a.brightness);
+          }
+          blobs.push(...blobsA2.slice(0, rem));
+        }
+      }
+      if (blobs.length > 0) {
+        candsByIdx.push({ frameIdx: i, timestampMs: ts, blobs });
+      }
     }
   }
 
@@ -391,8 +406,8 @@ export function extractFlyingBallTrackFromFrames(
         }
       }
 
-      seeds.sort((x, y) => x.dist - y.dist);
-      for (let si = 0; si < Math.min(seeds.length, 4); si++) {
+      seeds.sort((x, y) => (x.blob.area >= 3 ? 0 : 1) - (y.blob.area >= 3 ? 0 : 1) || x.dist - y.dist);
+      for (let si = 0; si < Math.min(seeds.length, 6); si++) {
         const seed = seeds[si];
         const entryB = candsByIdx[seed.entryIdx];
         const track: TrackNode[] = [
@@ -520,9 +535,9 @@ export function extractFlyingBallTrackFromFrames(
         const minSpan = sizeRatio >= 1.45 && trimmed.length >= 8 ? procWidth * 0.022 : procWidth * 0.055;
         if (dtMs < 300 || dtMs > 900 || span < minSpan) continue;
 
-        // Reject tracks that end on/inside the pitcher's own body/head (e.g. post-pitch walk-off or follow-through arm),
-        // while allowing distant shrunk baseballs (sizeRatio >= 1.45, endSz <= 8px) flying past above the shoulders
+        // Reject tracks that end on/inside the pitcher's own body or head/ears (even when leaning sideways on follow-through)
         const endExcl = frames[trimmed[trimmed.length - 1].frameIdx]?.exclusion;
+        const endNode = trimmed[trimmed.length - 1].blob;
         if (endExcl?.bodyBox) {
           const bb = endExcl.bodyBox;
           const bx0 = bb.x0 * toProcX;
@@ -530,15 +545,15 @@ export function extractFlyingBallTrackFromFrames(
           const bx1 = bb.x1 * toProcX;
           const by1 = bb.y1 * toProcY;
           const bH = Math.max(20, by1 - by0);
-          const endNode = trimmed[trimmed.length - 1].blob;
-          const inBody = endNode.x >= bx0 && endNode.x <= bx1 && endNode.y >= by0 && endNode.y <= by1;
-          const inHeadHalo =
-            endNode.x >= bx0 - bH * 0.10 &&
-            endNode.x <= bx1 + bH * 0.10 &&
-            endNode.y >= by0 - bH * 0.26 &&
-            endNode.y <= by0;
-          const isDistantShrunkBall = sizeRatio >= 1.45 && endSz <= 8.0 && trimmed.length >= 8;
-          if (inBody || (inHeadHalo && !isDistantShrunkBall)) {
+          if (endNode.x >= bx0 && endNode.x <= bx1 && endNode.y >= by0 - bH * 0.28 && endNode.y <= by1) {
+            continue;
+          }
+        }
+        if (endExcl?.headPoint && endExcl.headPoint.torso > 0) {
+          const hx = endExcl.headPoint.x * toProcX;
+          const hy = endExcl.headPoint.y * toProcY;
+          const hTorso = endExcl.headPoint.torso * toProcY;
+          if (Math.hypot(endNode.x - hx, endNode.y - hy) <= hTorso * 0.45) {
             continue;
           }
         }

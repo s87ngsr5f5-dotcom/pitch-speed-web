@@ -38,6 +38,7 @@ export interface PoseReleaseEvent {
 export interface PitcherExclusionSnapshot {
   ts: number;
   bodyBox?: { x0: number; y0: number; x1: number; y1: number };
+  headPoint?: { x: number; y: number; torso: number };
   throwingWrist?: { x: number; y: number; torso: number };
   gloveWrist?: { x: number; y: number; torso: number };
 }
@@ -238,12 +239,21 @@ export class PitcherPoseGate {
         ts,
       };
     }
-    // 更新完整軀幹／下半身／非投球手肘與雙手腕快照（供 3 幀差分引擎排除投手肢體／手套）
+    // 更新完整軀幹／下半身／非投球手肘與頭部／雙手腕快照（頭部僅供末幀封殺，避免遮擋耳側出手瞬間）
     const gElbow = useRight ? 7 : 8;
     const bodyIds = [
       KP.L_SHOULDER, KP.R_SHOULDER, gElbow, KP.L_HIP, KP.R_HIP,
       KP.L_KNEE, KP.R_KNEE, KP.L_ANKLE, KP.R_ANKLE,
     ].filter(ok);
+    const headIds = [0, 3, 4].filter(ok);
+    const headPoint =
+      headIds.length > 0
+        ? {
+            x: headIds.reduce((s, i) => s + kp[i][0], 0) / headIds.length,
+            y: headIds.reduce((s, i) => s + kp[i][1], 0) / headIds.length,
+            torso,
+          }
+        : undefined;
     const gIdx = useRight ? KP.L_WRIST : KP.R_WRIST;
     this.lastExclusion = {
       ts,
@@ -256,6 +266,7 @@ export class PitcherPoseGate {
               y1: Math.max(...bodyIds.map((i) => kp[i][1])) + torso * 0.16,
             }
           : undefined,
+      headPoint,
       throwingWrist: ok(wIdx) ? { x: kp[wIdx][0], y: kp[wIdx][1], torso } : undefined,
       gloveWrist: ok(gIdx) ? { x: kp[gIdx][0], y: kp[gIdx][1], torso } : undefined,
     };

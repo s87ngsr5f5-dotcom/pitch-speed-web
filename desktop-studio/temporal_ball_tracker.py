@@ -75,6 +75,7 @@ def _pitcher_exclusion_boxes(
     glove_xy = (float(kp[g_idx, 0]) * sx, float(kp[g_idx, 1]) * sy) if kp[g_idx, 2] > 0.25 else None
 
     # Lower-body + torso + non-throwing elbow box to reject pants, cleats, jersey, and glove-side arm
+    # (head keypoints 0,3,4 are checked separately at track-end so ear-level ball release is never masked!)
     g_elbow = 7 if hand == "R" else 8
     body_pts = [(float(kp[k, 0]) * sx, float(kp[k, 1]) * sy) for k in (5, 6, g_elbow, 11, 12, 13, 14, 15, 16) if kp[k, 2] > 0.25]
     if len(body_pts) < 3:
@@ -239,6 +240,7 @@ def extract_temporal_ball_tracks(
         body_box, wrist_xy, glove_xy, torso = _pitcher_exclusion_boxes(st, proc_w, proc_h, orig_w, orig_h)
 
         blobs: List[TemporalBlob] = []
+        blobs_a2: List[TemporalBlob] = []
         for mask_bool, pol in ((bright_mask, 1), (dark_mask, -1)):
             if not np.any(mask_bool):
                 continue
@@ -280,10 +282,22 @@ def extract_temporal_ball_tracks(
                     if math.hypot(cx - glove_xy[0], cy - glove_xy[1]) <= torso * 0.28:
                         continue
                 br = float(curr_g[min(proc_h - 1, max(0, int(round(cy)))), min(proc_w - 1, max(0, int(round(cx))))])
-                blobs.append(TemporalBlob(x=cx, y=cy, w=float(bw), h=float(bh), area=float(area), brightness=br, polarity=pol))
+                tb = TemporalBlob(x=cx, y=cy, w=float(bw), h=float(bh), area=float(area), brightness=br, polarity=pol)
+                if area == 2:
+                    blobs_a2.append(tb)
+                else:
+                    blobs.append(tb)
 
-        if 0 < len(blobs) <= 55:
-            cands_by_frame.append((i, round(i * 1000.0 / fps, 2), blobs))
+        # Only include up to 12 brightest 2px distant-ball blobs in clean/low-clutter frames (<=25 larger blobs)
+        if len(blobs) <= 85:
+            if len(blobs) <= 25 and blobs_a2:
+                rem = min(12, 45 - len(blobs))
+                if rem > 0:
+                    if len(blobs_a2) > rem:
+                        blobs_a2.sort(key=lambda b: b.brightness, reverse=True)
+                    blobs.extend(blobs_a2[:rem])
+            if blobs:
+                cands_by_frame.append((i, round(i * 1000.0 / fps, 2), blobs))
 
     if len(cands_by_frame) < 6:
         return []
@@ -324,9 +338,9 @@ def extract_temporal_ball_tracks(
                     if min_step_base * df <= dist <= max_step_base * df:
                         seeds.append((b, dist, cand))
 
-            # Keep top 4 closest/plausible initial seeds per start blob to stay fast
-            seeds.sort(key=lambda item: item[1])
-            for seed_entry_idx, _, b1 in seeds[:4]:
+            # Keep top 6 plausible initial seeds per start blob (prefer area>=3 over 2px specks)
+            seeds.sort(key=lambda item: (0 if item[2].area >= 3 else 1, item[1]))
+            for seed_entry_idx, _, b1 in seeds[:6]:
                 f_b, ts_b, _ = cands_by_frame[seed_entry_idx]
                 track: List[Tuple[int, float, TemporalBlob]] = [(f_a, ts_a, b0), (f_b, ts_b, b1)]
                 df0 = max(1, f_b - f_a)
@@ -463,21 +477,28 @@ def extract_temporal_ball_tracks(
                 if span < min_span:
                     continue
 
-                # Reject tracks that end on/inside the pitcher's own body/head (e.g. follow-through arm or walk-off),
-                # while allowing distant shrunk baseballs (size_ratio >= 1.45, end_sz <= 8px) flying past above the shoulders
+                # Reject tracks that end on/inside the pitcher's own body or head/ears (even when leaning sideways on follow-through)
                 if pose_states is not None:
                     end_f = track[-1][0]
                     if 0 <= end_f < len(pose_states):
-                        e_box, _, _, _ = _pitcher_exclusion_boxes(pose_states[end_f], proc_w, proc_h, orig_w, orig_h)
+                        e_st = pose_states[end_f]
+                        e_box, _, _, e_torso = _pitcher_exclusion_boxes(e_st, proc_w, proc_h, orig_w, orig_h)
+                        ex_p, ey_p = track[-1][2].x, track[-1][2].y
                         if e_box is not None:
                             bx0, by0, bx1, by1 = e_box
                             bh = max(20.0, by1 - by0)
-                            ex_p, ey_p = track[-1][2].x, track[-1][2].y
-                            in_body = bx0 <= ex_p <= bx1 and by0 <= ey_p <= by1
-                            in_head_halo = bx0 - bh * 0.10 <= ex_p <= bx1 + bh * 0.10 and by0 - bh * 0.26 <= ey_p <= by0
-                            is_distant_shrunk_ball = size_ratio >= 1.45 and end_sz <= 8.0 and len(track) >= 8
-                            if in_body or (in_head_halo and not is_distant_shrunk_ball):
+                            if bx0 <= ex_p <= bx1 and by0 - bh * 0.28 <= ey_p <= by1:
                                 continue
+                        e_kp = getattr(e_st, "keypoints", None) if e_st is not None else None
+                        if e_kp is not None and e_torso > 0:
+                            sx_p = proc_w / max(1.0, float(orig_w))
+                            sy_p = proc_h / max(1.0, float(orig_h))
+                            head_pts = [(float(e_kp[k, 0]) * sx_p, float(e_kp[k, 1]) * sy_p) for k in (0, 3, 4) if e_kp[k, 2] > 0.25]
+                            if head_pts:
+                                hx = sum(p[0] for p in head_pts) / len(head_pts)
+                                hy = sum(p[1] for p in head_pts) / len(head_pts)
+                                if math.hypot(ex_p - hx, ey_p - hy) <= e_torso * 0.45:
+                                    continue
 
                 # Reject steep upward windup hand-raise trajectories (pitches fly forward/downward under gravity)
                 upward_rise = track[0][2].y - track[-1][2].y

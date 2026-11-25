@@ -462,8 +462,8 @@ export async function analyzeUploadedPitchWindows(
       }
     }
 
-    // Pass 2: Crisp 440px Zero-Drop Pose + 3-Frame Temporal Ballistic Scan (recovers unseen outdoor stadiums & portrait IG clips!)
-    const tScale = Math.min(1, 440 / Math.max(1, Math.min(origW, origH)));
+    // Pass 2: Crisp 540px Zero-Drop Pose + 3-Frame Temporal Ballistic Scan (exact 1:1 resolution parity with Desktop Studio!)
+    const tScale = Math.min(1, 540 / Math.max(1, Math.min(origW, origH)));
     const pw = Math.max(64, Math.round(origW * tScale));
     const ph = Math.max(64, Math.round(origH * tScale));
     workCanvas.width = pw;

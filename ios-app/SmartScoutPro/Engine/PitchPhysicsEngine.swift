@@ -175,7 +175,7 @@ final class PitchPhysicsEngine {
                 var e = segEnd
                 while s < e && depthStationary(s) { s += 1 }
                 while e > s && depthStationary(e - 1) { e -= 1 }
-                // 濾除出手前拉臂／蓄力回擺幀，對齊真正出手瞬間
+                // 濾除出手前拉臂／蓄力回擺幀，對齊真正出手瞬間（保留高拋彩虹球上升段）
                 if e - s >= 4 {
                     let dirX = Double(points[e].x - points[s].x)
                     let dirY = Double(points[e].y - points[s].y)
@@ -184,7 +184,8 @@ final class PitchPhysicsEngine {
                         while e - s >= 4 {
                             let sx = Double(points[s + 1].x - points[s].x)
                             let sy = Double(points[s + 1].y - points[s].y)
-                            if (sx * dirX + sy * dirY) / dirLen < -0.004 {
+                            let isRainbowRise = sy < 0 && abs(sx) <= abs(sy) * 1.4
+                            if (sx * dirX + sy * dirY) / dirLen < -0.004 && !isRainbowRise {
                                 s += 1
                             } else {
                                 break
@@ -195,9 +196,15 @@ final class PitchPhysicsEngine {
                 if e - s >= 4 {
                     let firstDet = detections[s]
                     let lastDet = detections[e]
-                    let sSize = max(firstDet.width, firstDet.height)
-                    let eSize = max(lastDet.width, lastDet.height)
-                    let sizeRatio = max(sSize / max(1, eSize), eSize / max(1, sSize))
+                    let earlyEnd = min(e, s + 2)
+                    let lateStart = max(s, e - 2)
+                    let earlySzs = detections[s...earlyEnd].map { max($0.width, $0.height) }
+                    let lateSzs = detections[lateStart...e].map { max($0.width, $0.height) }
+                    let maxEarly = earlySzs.max() ?? max(firstDet.width, firstDet.height)
+                    let minEarly = earlySzs.min() ?? max(firstDet.width, firstDet.height)
+                    let maxLate = lateSzs.max() ?? max(lastDet.width, lastDet.height)
+                    let minLate = lateSzs.min() ?? max(lastDet.width, lastDet.height)
+                    let sizeRatio = max(maxEarly / max(1, minLate), maxLate / max(1, minEarly))
                     let span = hypot(Double(points[e].x - points[s].x), Double(points[e].y - points[s].y))
                     let isDepth = sizeRatio >= 1.32 && span >= 0.014
                     let isOblique = sizeRatio >= 1.12 && span >= 0.12
